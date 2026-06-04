@@ -46,3 +46,4 @@ npx playwright test
 - **Rate Limiting**: AI API routes include basic in-memory rate limiting.
 - **Zod Validation**: Strict schema validation protects the API endpoints.
 - **Content Security Policy (CSP)**: Headers enforced in `next.config.mjs`.
+# Excel_analysis

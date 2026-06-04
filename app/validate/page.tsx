@@ -52,16 +52,42 @@ export default function ValidatePage() {
     console.log('1. parsedWorkbook loaded:', !!workbook);
 
     setIsProcessing(true);
-    setProgress(20);
+    setProgress(10);
+    setCurrentStep("Mapping Columns with AI...");
+
+    const mappingPayload = {
+      ...workbook,
+      sheets: workbook.sheets.map(sheet => ({
+        ...sheet,
+        data: sheet.data.slice(0, 3)
+      }))
+    };
+
+    let workbookMapping = {};
+    try {
+      const mapRes = await fetch('/api/map-columns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(mappingPayload)
+      });
+
+      if (mapRes.ok) {
+        workbookMapping = await mapRes.json();
+      }
+    } catch (err) {
+      console.error('Failed to map columns', err);
+    }
+
+    setProgress(30);
     setCurrentStep("Running Core Validation Rules...");
 
     // Dynamically import to avoid running heavy logic on mount
     const { runValidationPipeline } = await import('@/lib/validator');
     
-    const generatedReport = runValidationPipeline(workbook);
+    const generatedReport = runValidationPipeline(workbook, workbookMapping);
     console.log('2. pipeline complete, issues:', generatedReport.issues.length);
 
-    setProgress(60);
+    setProgress(65);
     setCurrentStep("AI Enrichment via Gemini...");
 
     let finalReport = generatedReport;

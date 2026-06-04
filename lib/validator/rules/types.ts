@@ -1,4 +1,5 @@
 import { ParsedWorkbook, ValidationIssue, CrossSheetCheckResult } from '../types';
+import { WorkbookMapping } from '../../ai/columnMapper';
 
 export interface RuleModule {
   /**
@@ -9,7 +10,7 @@ export interface RuleModule {
   /**
    * Executes the rules against the workbook and returns found issues.
    */
-  run: (workbook: ParsedWorkbook) => {
+  run: (workbook: ParsedWorkbook, mapping: WorkbookMapping) => {
     issues: ValidationIssue[];
     crossSheetChecks?: CrossSheetCheckResult[];
   };

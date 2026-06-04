@@ -1,404 +1,195 @@
 import { RuleModule } from './types';
-import { ParsedWorkbook, ParsedSheet, ValidationIssue, AffectedRow } from '../types';
-import { parseDuration, durationDiffSeconds } from '../../utils/time';
-import { columnGuard } from '../utils';
+import { ParsedWorkbook, ValidationIssue } from '../types';
+import { WorkbookMapping, SheetMapping, getColumnValue } from '../../ai/columnMapper';
 
-function getSheet(wb: ParsedWorkbook, type: string): ParsedSheet | undefined {
-  return wb.sheets.find(s => s.type === type);
+function findActualColumnByConcept(concept: string, mapping: SheetMapping): string | undefined {
+  if (!mapping || !mapping.columns) return undefined;
+  return Object.entries(mapping.columns).find(([_, c]) => c === concept)?.[0];
+}
+
+function parseDuration(val: any): number {
+  if (val === null || val === undefined || val === '') return 0;
+  const num = Number(val);
+  return isNaN(num) ? 0 : num;
 }
 
 export const requestDetailsRules: RuleModule = {
   name: 'request-details-rules',
-  
-  run: (wb: ParsedWorkbook) => {
+  run: (workbook: ParsedWorkbook, mapping: WorkbookMapping) => {
     const issues: ValidationIssue[] = [];
-    
-    const requestDetails = getSheet(wb, 'Request Details');
-    if (!requestDetails) return { issues };
 
-    // We no longer rely on columnGuard for issues, as FR-24 handles missing required fields centrally.
-    // However, if we wanted to enforce it here, we would group it.
-    // But data-quality.ts already checks required fields globally.
+    for (const sheet of workbook.sheets) {
+      const sheetMapping = mapping[sheet.sheetName];
+      if (!sheetMapping) continue;
 
-    const seenRequestIds = new Map<string, { row: number, id: string }[]>(); // map of requestid to row indices
-    
-    // Grouping collections
-    const missingCompletedBy: AffectedRow[] = [];
-    const invalidCancelledTat: AffectedRow[] = [];
-    const invalidRequestStatus: AffectedRow[] = [];
-    const timeReversal: AffectedRow[] = [];
-    const tatMismatch: AffectedRow[] = [];
-    const zeroCompletedTat: AffectedRow[] = [];
-    const negativeRows: AffectedRow[] = [];
-    const wrongDurationRows: AffectedRow[] = [];
-    const fixedZeroRows: AffectedRow[] = [];
-
-    const zeroDurationVals = ['00:00:00', '0:00:00', '00:00', '0'];
-    const tatFields = [
-      'tat (assigned to complete)',
-      'tat (accept to arrive)',
-      'tat (arrive to complete)',
-      'tat (accept to complete)'
-    ];
-
-    requestDetails.data.forEach((row, rowIndex) => {
-      const displayRow = rowIndex + 2;
-      const status = String(row['status'] || '').trim();
-      const requestId = String(row['requestid'] || '').trim();
-
-      // FR-15: Track Request IDs for duplication detection
-      if (requestId) {
-        if (!seenRequestIds.has(requestId)) seenRequestIds.set(requestId, []);
-        seenRequestIds.get(requestId)!.push({ row: displayRow, id: requestId });
-      }
-
-      // FR-13: Status=Completed -> CompletedBy must not be blank
-      if (status.toLowerCase() === 'completed') {
-        const completedBy = String(row['completed by'] || '').trim();
-        if (!completedBy) {
-          missingCompletedBy.push({
-            rowNumber: displayRow,
-            columnName: 'completed by',
-            actualValue: completedBy,
-            expectedValue: 'Non-empty name'
-          });
-        }
-
-        // FR-32: Completed requests with 00:00:00 TAT
-        const allZero = tatFields.every(field => {
-          const val = String(row[field] ?? '').trim();
-          return val === '' || zeroDurationVals.includes(val);
-        });
-        
-        if (allZero) {
-          zeroCompletedTat.push({
-            rowNumber: displayRow,
-            columnName: 'TAT Fields',
-            actualValue: '00:00:00 across all TAT fields',
-            expectedValue: 'Non-zero TAT for completed request'
-          });
-        }
-      }
-
-      // FR-14: Status=Cancelled -> TAT fields must be blank/zero
-      if (status.toLowerCase() === 'cancelled') {
-        const tatFields = ['tat (accept to arrive)', 'tat (arrive to complete)', 'tat (accept to complete)', 'tat (assigned to complete)'];
-        let hasInvalidTat = false;
-        let invalidVal = '';
-        
-        for (const field of tatFields) {
-          const val = row[field];
-          if (val && parseDuration(val) > 0) {
-            hasInvalidTat = true;
-            invalidVal = `${field}=${val}`;
-            break;
-          }
-        }
-
-        if (hasInvalidTat) {
-          invalidCancelledTat.push({
-            rowNumber: displayRow,
-            columnName: 'tat fields',
-            actualValue: invalidVal,
-            expectedValue: 'Zero or empty'
-          });
-        }
-      }
-
-      // FR-16: Request time status values
-      const requestTimeStatus = row['request time status'];
-      if (requestTimeStatus !== undefined && requestTimeStatus !== null) {
-        const val = String(requestTimeStatus);
-        if (val !== '' && val !== 'Less than 3mins' && val !== 'More than 30mins') {
-          invalidRequestStatus.push({
-            rowNumber: displayRow,
-            columnName: 'request time status',
-            actualValue: val,
-            expectedValue: 'Less than 3mins OR More than 30mins'
-          });
-        }
-      }
-
-      // CHECK A — Negative TAT (End time before Start time)
-      const startTime = String(row['start time'] || '').trim();
-      const endTime = String(row['end time'] || '').trim();
-      if (startTime && endTime) {
-        const start = new Date(startTime);
-        const end = new Date(endTime);
-        
-        // Use our parseDuration for timeReversal if timestamps are times, or just use the Date objects if they are valid dates
-        if (!isNaN(start.getTime()) && !isNaN(end.getTime())) {
-          const durationSeconds = (end.getTime() - start.getTime()) / 1000;
-          if (durationSeconds < 0) {
-            negativeRows.push({
-              rowNumber: displayRow,
-              columnName: 'start time / end time',
-              actualValue: `Start: ${startTime} → End: ${endTime}`,
-              expectedValue: 'End time must be after Start time'
-            });
-          }
-          
-          // CHECK B — Recorded duration does not match calculated duration
-          const rawDurationField = 'duration(create to complete)' in row ? row['duration(create to complete)'] : row['tat (create to complete)'];
-          if (rawDurationField) {
-            const calculatedSeconds = Math.abs(durationSeconds);
-            const recordedSeconds = parseDuration(String(rawDurationField));
-            
-            const diff = Math.abs(calculatedSeconds - recordedSeconds);
-            if (diff > 60) {
-              wrongDurationRows.push({
-                rowNumber: displayRow,
-                columnName: 'Duration(Create to Complete)',
-                actualValue: String(rawDurationField),
-                expectedValue: `${Math.floor(calculatedSeconds/3600)}:${Math.floor((calculatedSeconds%3600)/60)}:${calculatedSeconds%60}`
-              });
-            }
-          }
-        } else if (parseDuration(startTime) > parseDuration(endTime)) {
-          timeReversal.push({
-            rowNumber: displayRow,
-            columnName: 'start time / end time',
-            actualValue: `${startTime} -> ${endTime}`,
-            expectedValue: `Start time before End time`
-          });
-        }
-      }
-
-      // CHECK C — TAT fixed to zero on non-cancelled completed requests
-      if (status.toLowerCase() === 'completed') {
-        const rawDurationField = 'duration(create to complete)' in row ? row['duration(create to complete)'] : row['tat (create to complete)'];
-        const totalDuration = parseDuration(String(rawDurationField ?? ''));
-        if (totalDuration > 0) {
-          const zeroTatFields = tatFields.filter(field => {
-            const val = String(row[field] ?? '').trim();
-            return val === '' || zeroDurationVals.includes(val);
-          });
-          
-          if (zeroTatFields.length > 0) {
-            fixedZeroRows.push({
-              rowNumber: displayRow,
-              columnName: zeroTatFields.join(', '),
-              actualValue: '00:00:00',
-              expectedValue: 'Non-zero value (work was performed)'
-            });
-          }
-        }
-      }
-
-      // FR-18: TAT(Accept->Complete) approx eq TAT(Accept->Arrive) + TAT(Arrive->Complete)
-      const tatAcceptToArrive = row['tat (accept to arrive)'];
-      const tatArriveToComplete = row['tat (arrive to complete)'];
-      const tatAcceptToComplete = row['tat (accept to complete)'];
+      const reqIdCol = findActualColumnByConcept('request_id', sheetMapping);
+      const statusCol = findActualColumnByConcept('status', sheetMapping);
+      const startCol = findActualColumnByConcept('start_time', sheetMapping);
+      const endCol = findActualColumnByConcept('end_time', sheetMapping);
+      const durationCol = findActualColumnByConcept('total_duration', sheetMapping);
       
-      if (tatAcceptToArrive && tatArriveToComplete && tatAcceptToComplete) {
-        const sumParts = parseDuration(tatAcceptToArrive) + parseDuration(tatArriveToComplete);
-        const total = parseDuration(tatAcceptToComplete);
-        
-        if (sumParts > 0 && total > 0 && Math.abs(sumParts - total) > 5) {
-          tatMismatch.push({
-            rowNumber: displayRow,
-            columnName: 'tat (accept to complete)',
-            actualValue: `${tatAcceptToArrive} + ${tatArriveToComplete} != ${tatAcceptToComplete}`,
-            expectedValue: `Values must sum correctly`
+      const createToAcceptCol = findActualColumnByConcept('create_to_accept', sheetMapping);
+      const acceptToArriveCol = findActualColumnByConcept('accept_to_arrive', sheetMapping);
+      const arriveToCompleteCol = findActualColumnByConcept('arrive_to_complete', sheetMapping);
+      
+      const reqIds = new Set<string>();
+
+      sheet.data.forEach((row, i) => {
+        const rowNum = (sheet.headerRowIndex || 0) + i + 2;
+        const reqId = reqIdCol ? String(row[reqIdCol] || '').trim() : undefined;
+        const status = statusCol ? String(row[statusCol] || '').trim().toLowerCase() : '';
+        const start = startCol ? row[startCol] : null;
+        const end = endCol ? row[endCol] : null;
+        const duration = durationCol ? row[durationCol] : null;
+        const parsedDuration = parseDuration(duration);
+
+        // CRITICAL 6: Duplicate Request ID
+        if (reqId && reqId !== '') {
+          if (reqIds.has(reqId)) {
+            issues.push({
+              id: `dup-req-${reqId}-${rowNum}`,
+              issueType: 'Duplicate Request ID',
+              category: 'CRITICAL ERRORS',
+              sheetName: sheet.sheetName,
+              severity: 'critical',
+              condition: 'Request IDs must be unique',
+              description: `Request ID ${reqId} appears multiple times.`,
+              affectedRows: [{ rowNumber: rowNum, columnName: reqIdCol!, actualValue: reqId, expectedValue: 'Unique ID', requestId: reqId }],
+              affectedColumns: [reqIdCol!],
+              totalAffectedRows: 1,
+              remediationSuggestion: 'Remove or consolidate duplicate rows.',
+              remediationType: 'manual',
+              source: 'rule'
+            });
+          }
+          reqIds.add(reqId);
+        }
+
+        const isCompleted = status.includes('complete');
+
+        // CRITICAL 2: TAT/Duration Zero on Completed Request
+        if (isCompleted && durationCol && (duration === null || duration === '' || parsedDuration === 0)) {
+          issues.push({
+            id: `zero-dur-${rowNum}`,
+            issueType: 'TAT/Duration Zero on Completed Request',
+            category: 'CRITICAL ERRORS',
+            sheetName: sheet.sheetName,
+            severity: 'critical',
+            condition: 'Completed requests must have total_duration > 0',
+            description: `Request is marked Completed but total duration is 0 or empty.`,
+            affectedRows: [{ rowNumber: rowNum, columnName: durationCol, actualValue: duration, expectedValue: '> 0', requestId: reqId }],
+            affectedColumns: [durationCol, statusCol!],
+            totalAffectedRows: 1,
+            remediationSuggestion: 'Check if timestamps were recorded properly.',
+            remediationType: 'manual',
+            source: 'rule'
           });
         }
-      }
-    });
 
-    // Create Grouped Issues
-
-    if (missingCompletedBy.length > 0) {
-      issues.push({
-        id: `RD-13-all`,
-        issueType: 'Missing Values',
-        category: 'Data Completeness',
-        sheetName: requestDetails.sheetName,
-        severity: 'critical',
-        condition: 'Completed requests must have CompletedBy',
-        description: `Requests are marked as Completed but 'Completed By' is blank.`,
-        affectedRows: missingCompletedBy,
-        affectedColumns: ['completed by', 'status'],
-        totalAffectedRows: missingCompletedBy.length,
-        remediationSuggestion: `Provide the name of the porter who completed these requests.`,
-        remediationType: 'manual',
-        source: 'rule'
-      });
-    }
-
-    if (invalidCancelledTat.length > 0) {
-      issues.push({
-        id: `RD-14-all`,
-        issueType: 'Invalid State',
-        category: 'Logic Integrity',
-        sheetName: requestDetails.sheetName,
-        severity: 'medium',
-        condition: 'Cancelled requests must have zero TAT',
-        description: `Requests are Cancelled but contain non-zero TAT values.`,
-        affectedRows: invalidCancelledTat,
-        affectedColumns: ['status', 'tat fields'],
-        totalAffectedRows: invalidCancelledTat.length,
-        remediationSuggestion: `Clear TAT values for cancelled requests.`,
-        remediationType: 'auto',
-        source: 'rule'
-      });
-    }
-
-    if (invalidRequestStatus.length > 0) {
-      issues.push({
-        id: `RD-16-all`,
-        issueType: 'Invalid Data',
-        category: 'Data Quality',
-        sheetName: requestDetails.sheetName,
-        severity: 'medium',
-        condition: 'Status must match allowed values',
-        description: `Invalid Request Time Status values found. Must be 'Less than 3mins' or 'More than 30mins'.`,
-        affectedRows: invalidRequestStatus,
-        affectedColumns: ['request time status'],
-        totalAffectedRows: invalidRequestStatus.length,
-        remediationSuggestion: `Standardize to accepted status values.`,
-        remediationType: 'auto',
-        source: 'rule'
-      });
-    }
-
-    if (timeReversal.length > 0) {
-      issues.push({
-        id: `RD-17-all`,
-        issueType: 'Invalid Date',
-        category: 'Logic Integrity',
-        sheetName: requestDetails.sheetName,
-        severity: 'critical',
-        condition: 'Start time must be before End time',
-        description: `Start time is after End time for these requests.`,
-        affectedRows: timeReversal,
-        affectedColumns: ['start time', 'end time'],
-        totalAffectedRows: timeReversal.length,
-        remediationSuggestion: `Verify the timestamps. If spanning midnight, ensure dates are attached.`,
-        remediationType: 'manual',
-        source: 'rule'
-      });
-    }
-
-    if (tatMismatch.length > 0) {
-      issues.push({
-        id: `RD-18-all`,
-        issueType: 'Formula Error',
-        category: 'Logic Integrity',
-        sheetName: requestDetails.sheetName,
-        severity: 'critical',
-        condition: 'TAT components must sum to total TAT',
-        description: `TAT Arithmetic mismatch: Accept->Arrive + Arrive->Complete != Accept->Complete.`,
-        affectedRows: tatMismatch,
-        affectedColumns: ['tat (accept to arrive)', 'tat (arrive to complete)', 'tat (accept to complete)'],
-        totalAffectedRows: tatMismatch.length,
-        remediationSuggestion: `Review the component TATs to correct the total TAT.`,
-        remediationType: 'manual',
-        source: 'rule'
-      });
-    }
-
-    if (zeroCompletedTat.length > 0) {
-      issues.push({
-        id: `RD-32-all`,
-        issueType: 'Invalid Data',
-        category: 'TAT Validation',
-        sheetName: requestDetails.sheetName,
-        severity: 'critical',
-        condition: 'Completed request must have non-zero TAT',
-        description: `Requests are marked as Completed but have 00:00:00 or empty values across all TAT fields.`,
-        affectedRows: zeroCompletedTat,
-        affectedColumns: ['status', ...tatFields],
-        totalAffectedRows: zeroCompletedTat.length,
-        remediationSuggestion: `Verify the timestamps. Work completed instantly is likely a data entry error.`,
-        remediationType: 'review',
-        source: 'rule'
-      });
-    }
-
-    if (negativeRows.length > 0) {
-      issues.push({
-        id: `RD-NEGTAT-${Date.now()}`,
-        issueType: 'Negative Duration',
-        category: 'TAT Validation',
-        sheetName: requestDetails.sheetName,
-        severity: 'critical',
-        condition: 'End time must be after Start time',
-        description: `End time is before Start time.`,
-        affectedRows: negativeRows,
-        affectedColumns: ['start time', 'end time'],
-        totalAffectedRows: negativeRows.length,
-        remediationSuggestion: `Verify the timestamps.`,
-        remediationType: 'manual',
-        source: 'rule'
-      });
-    }
-
-    if (wrongDurationRows.length > 0) {
-      issues.push({
-        id: `RD-WRONGDUR-${Date.now()}`,
-        issueType: 'Incorrect Duration',
-        category: 'TAT Validation',
-        sheetName: requestDetails.sheetName,
-        severity: 'critical',
-        condition: 'Recorded duration must match calculated duration from timestamps',
-        description: `The recorded duration does not match the difference between Start time and End time.`,
-        affectedRows: wrongDurationRows,
-        affectedColumns: ['start time', 'end time', 'duration(create to complete)'],
-        totalAffectedRows: wrongDurationRows.length,
-        remediationSuggestion: `Check how the duration was calculated.`,
-        remediationType: 'manual',
-        source: 'rule'
-      });
-    }
-
-    if (fixedZeroRows.length > 0) {
-      issues.push({
-        id: `RD-ZEROTAT-${Date.now()}`,
-        issueType: 'Suspicious Zero TAT',
-        category: 'TAT Validation',
-        sheetName: requestDetails.sheetName,
-        severity: 'critical',
-        condition: 'TAT components must not be exactly zero if work was done',
-        description: `Work was performed (Total Duration > 0) but some TAT fields are exactly 00:00:00.`,
-        affectedRows: fixedZeroRows,
-        affectedColumns: ['tat fields'],
-        totalAffectedRows: fixedZeroRows.length,
-        remediationSuggestion: `Review these requests as porters may not be properly recording status changes.`,
-        remediationType: 'review',
-        source: 'rule'
-      });
-    }
-
-    // Process FR-15 Duplicates
-    const duplicateRows: AffectedRow[] = [];
-    for (const [reqId, occurrences] of Array.from(seenRequestIds.entries())) {
-      if (occurrences.length >= 3) {
-        occurrences.forEach(occ => {
-          duplicateRows.push({
-            rowNumber: occ.row,
-            columnName: 'requestid',
-            actualValue: occ.id,
-            expectedValue: 'Appears max 2 times'
+        // CRITICAL 3: Negative Duration
+        if (parsedDuration < 0) {
+          issues.push({
+            id: `neg-dur-${rowNum}`,
+            issueType: 'Negative Duration',
+            category: 'CRITICAL ERRORS',
+            sheetName: sheet.sheetName,
+            severity: 'critical',
+            condition: 'Duration >= 0',
+            description: `Duration is negative. End time might be before Start time.`,
+            affectedRows: [{ rowNumber: rowNum, columnName: durationCol!, actualValue: parsedDuration, expectedValue: '>= 0', requestId: reqId }],
+            affectedColumns: [durationCol!],
+            totalAffectedRows: 1,
+            remediationSuggestion: 'Correct the start and end timestamps.',
+            remediationType: 'manual',
+            source: 'rule'
           });
-        });
-      }
-    }
+        }
 
-    if (duplicateRows.length > 0) {
-      issues.push({
-        id: `RD-15-all`,
-        issueType: 'Duplicate Records',
-        category: 'Data Quality',
-        sheetName: requestDetails.sheetName,
-        severity: 'critical',
-        condition: 'RequestID must not appear 3 or more times',
-        description: `Request IDs appear 3 or more times. A maximum of 2 assignments per request is allowed.`,
-        affectedRows: duplicateRows,
-        affectedColumns: ['requestid'],
-        totalAffectedRows: duplicateRows.length,
-        remediationSuggestion: `Remove or merge duplicate request entries.`,
-        remediationType: 'manual',
-        source: 'rule'
+        // CRITICAL 5: TAT Components Don't Sum to Total
+        if (durationCol && createToAcceptCol && acceptToArriveCol && arriveToCompleteCol) {
+          const p1 = parseDuration(row[createToAcceptCol]);
+          const p2 = parseDuration(row[acceptToArriveCol]);
+          const p3 = parseDuration(row[arriveToCompleteCol]);
+          const sum = p1 + p2 + p3;
+          // allow small float rounding differences
+          if (Math.abs(sum - parsedDuration) > 1) {
+            issues.push({
+              id: `sum-dur-${rowNum}`,
+              issueType: "TAT Components Don't Sum to Total",
+              category: 'CRITICAL ERRORS',
+              sheetName: sheet.sheetName,
+              severity: 'critical',
+              condition: 'Sum of components == total_duration',
+              description: `Component times (${p1} + ${p2} + ${p3} = ${sum}) do not match total duration (${parsedDuration}).`,
+              affectedRows: [{ rowNumber: rowNum, columnName: durationCol, actualValue: parsedDuration, expectedValue: String(sum), requestId: reqId }],
+              affectedColumns: [durationCol, createToAcceptCol, acceptToArriveCol, arriveToCompleteCol],
+              totalAffectedRows: 1,
+              remediationSuggestion: 'Verify the individual TAT components.',
+              remediationType: 'manual',
+              source: 'rule'
+            });
+          }
+        }
+
+        // MEDIUM 1: Partial TAT with Completed Status
+        // If completed, components should ideally be present if columns exist
+        if (isCompleted && createToAcceptCol && (row[createToAcceptCol] === null || row[createToAcceptCol] === '')) {
+           issues.push({
+              id: `part-tat-${rowNum}`,
+              issueType: 'Partial TAT with Completed Status',
+              category: 'MEDIUM ERRORS',
+              sheetName: sheet.sheetName,
+              severity: 'medium',
+              condition: 'Completed requests should have component TATs',
+              description: `Request is Completed but missing component TAT (${createToAcceptCol}).`,
+              affectedRows: [{ rowNumber: rowNum, columnName: createToAcceptCol, actualValue: 'Empty', expectedValue: 'Value > 0', requestId: reqId }],
+              affectedColumns: [createToAcceptCol, statusCol!],
+              totalAffectedRows: 1,
+              remediationSuggestion: 'Ensure all stages of the request are tracked.',
+              remediationType: 'manual',
+              source: 'rule'
+            });
+        }
+
+        // MEDIUM 2: Missing Completion Timestamp
+        if (isCompleted && endCol && (end === null || end === '')) {
+          issues.push({
+            id: `miss-end-${rowNum}`,
+            issueType: 'Missing Completion Timestamp',
+            category: 'MEDIUM ERRORS',
+            sheetName: sheet.sheetName,
+            severity: 'medium',
+            condition: 'Completed requests must have an end_time',
+            description: `Request is Completed but missing completion timestamp.`,
+            affectedRows: [{ rowNumber: rowNum, columnName: endCol, actualValue: 'Empty', expectedValue: 'Valid Date/Time', requestId: reqId }],
+            affectedColumns: [endCol, statusCol!],
+            totalAffectedRows: 1,
+            remediationSuggestion: 'Add the missing completion timestamp.',
+            remediationType: 'manual',
+            source: 'rule'
+          });
+        }
+
+        // MEDIUM 3: Invalid Status Value
+        const validStatuses = ['completed', 'cancelled', 'rejected', 'waiting', 'open', 'assigned', 'accepted', 'arrived', 'started', 'pending'];
+        if (statusCol && status !== '' && !validStatuses.some(s => status.includes(s))) {
+          issues.push({
+            id: `inv-stat-${rowNum}`,
+            issueType: 'Invalid Status Value',
+            category: 'MEDIUM ERRORS',
+            sheetName: sheet.sheetName,
+            severity: 'medium',
+            condition: 'Status must be a recognized value',
+            description: `Unrecognized status value: ${status}`,
+            affectedRows: [{ rowNumber: rowNum, columnName: statusCol, actualValue: status, expectedValue: 'Completed/Cancelled/etc', requestId: reqId }],
+            affectedColumns: [statusCol],
+            totalAffectedRows: 1,
+            remediationSuggestion: 'Standardize status values to accepted nomenclature.',
+            remediationType: 'manual',
+            source: 'rule'
+          });
+        }
+
       });
     }
 

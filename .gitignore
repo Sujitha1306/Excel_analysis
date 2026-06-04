@@ -34,3 +34,15 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Confidential & Custom Project Files
+.env
+prd.md
+techstack.md
+design.md
+PHASE1_COMPLETE.md
+PHASE2_COMPLETE.md
+PHASE3_COMPLETE.md
+PHASE4_COMPLETE.md
+PROJECT_COMPLETE.md
+.agents/

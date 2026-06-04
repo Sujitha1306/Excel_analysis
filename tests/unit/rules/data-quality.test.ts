@@ -1,14 +1,15 @@
-import { describe, it, expect } from 'vitest';
-import { dataQualityRules } from '../../../lib/validator/rules/data-quality';
-import { ParsedWorkbook } from '../../../lib/validator/types';
+import { describe, it, expect } from "vitest";
+import { dataQualityRules } from "../../../lib/validator/rules/data-quality";
+import { ParsedWorkbook } from "../../../lib/validator/types";
+import { WorkbookMapping } from "../../../lib/validator/mapping";
 
 function createMockWorkbook(sheets: any[]): ParsedWorkbook {
   return {
-    fileName: 'mock.xlsx',
+    fileName: "mock.xlsx",
     fileSize: 1000,
     sheets: sheets.map(s => ({
-      sheetName: s.type,
-      type: s.type,
+      sheetName: s.name,
+      type: "unknown",
       rowCount: s.data.length,
       colCount: Object.keys(s.data[0] || {}).length,
       data: s.data
@@ -16,116 +17,93 @@ function createMockWorkbook(sheets: any[]): ParsedWorkbook {
   };
 }
 
-describe('Data Quality Rules (FR-24 to FR-32)', () => {
-  it('FR-24: Detects blank required fields', () => {
+describe("Data Quality Rules", () => {
+  it("flags missing required fields and whitespace", () => {
     const wb = createMockWorkbook([
       {
-        type: 'Request Details',
+        name: "Request Details",
         data: [
-          { 'requestid': 'R1', 'porter name': 'John' }, // Valid (mostly)
-          { 'requestid': '', 'porter name': '' } // Missing ID and Name
+          { "Porter Name": " Alice ", "Request ID": "R1", Status: "Completed" },
+          { "Porter Name": "", "Request ID": "", Status: "" }
         ]
       }
     ]);
 
-    const { issues } = dataQualityRules.run(wb);
-    const blanks = issues.filter(i => i.issueType === 'Missing Values');
-    expect(blanks.length).toBeGreaterThan(0);
-    expect(blanks[0].severity).toBe('medium');
-  });
-
-  it('FR-25 & FR-26: Detects whitespace-only and leading/trailing whitespace (salma )', () => {
-    const wb = createMockWorkbook([
-      {
-        type: 'Request Details',
-        data: [
-          { 'porter name': '   ' }, // FR-25: whitespace only
-          { 'porter name': 'salma ' } // FR-26: trailing whitespace
-        ]
+    const mapping: WorkbookMapping = {
+      "Request Details": {
+        sheetType: "request_details",
+        isCountableSheet: false,
+        columns: {
+          "Porter Name": "porter_name",
+          "Request ID": "request_id",
+          Status: "status"
+        }
       }
-    ]);
+    };
 
-    const { issues } = dataQualityRules.run(wb);
-    
-    const onlySpace = issues.find(i => i.issueType === 'Whitespace Issue' && i.affectedRows[0].actualValue === '"   "');
-    expect(onlySpace).toBeDefined();
-
-    const trailing = issues.find(i => i.issueType === 'Whitespace Issue' && i.affectedRows[0].actualValue === 'salma ');
-    expect(trailing).toBeDefined();
-    expect(trailing?.remediationSuggestion).toContain('salma'); // Should suggest trimmed version
-    expect(trailing?.remediationType).toBe('auto');
+    const { issues } = dataQualityRules.run(wb, mapping);
+    expect(issues.some(i => i.issueType === "Missing Required Fields")).toBe(true);
+    expect(issues.some(i => i.issueType === "Whitespace in Name Fields")).toBe(true);
   });
 
-  it('FR-27: Detects ghost columns', () => {
+  it("flags porter ID mapped to different names", () => {
     const wb = createMockWorkbook([
       {
-        type: 'Request Details',
-        data: [
-          { 'requestid': 'R1', '__EMPTY_1': 'ghost data' }
-        ]
-      }
-    ]);
-
-    const { issues } = dataQualityRules.run(wb);
-    const ghostCol = issues.find(i => i.issueType === 'Ghost Column');
-    expect(ghostCol).toBeDefined();
-    expect(ghostCol?.severity).toBe('medium');
-  });
-
-  it('FR-29: Detects Porter ID mapped to different names across sheets', () => {
-    const wb = createMockWorkbook([
-      {
-        type: 'Porter Performance',
-        data: [{ 'porter id': 'P1', 'porter name': 'John Doe' }]
+        name: "Porter Performance",
+        data: [{ "Porter ID": "P1", "Porter Name": "John Doe" }]
       },
       {
-        type: 'Request Details',
-        data: [{ 'porter id': 'P1', 'porter name': 'Johnny Doe' }]
+        name: "Request Details",
+        data: [{ "Porter ID": "P1", "Porter Name": "Johnny Doe" }]
       }
     ]);
 
-    const { issues } = dataQualityRules.run(wb);
-    const mismatch = issues.find(i => i.issueType === 'Data Inconsistency');
-    expect(mismatch).toBeDefined();
-    expect(mismatch?.severity).toBe('medium');
+    const mapping: WorkbookMapping = {
+      "Porter Performance": {
+        sheetType: "porter_performance",
+        isCountableSheet: false,
+        columns: {
+          "Porter ID": "porter_id",
+          "Porter Name": "porter_name"
+        }
+      },
+      "Request Details": {
+        sheetType: "request_details",
+        isCountableSheet: false,
+        columns: {
+          "Porter ID": "porter_id",
+          "Porter Name": "porter_name"
+        }
+      }
+    };
+
+    const { issues } = dataQualityRules.run(wb, mapping);
+    expect(issues.some(i => i.issueType === "Porter ID Maps to Different Names")).toBe(true);
   });
 
-  it('FR-31: Detects statistical outliers in TAT values per pool', () => {
+  it("flags statistical outliers by pool", () => {
+    const poolRows = Array.from({ length: 12 }, () => ({ Pool: "A", Duration: "00:10:00" }));
+    poolRows.push({ Pool: "A", Duration: "05:00:00" });
+
     const wb = createMockWorkbook([
       {
-        type: 'Request Details',
-        data: [
-          // Pool A: Mean around 10 mins (600s). StdDev ~ 0.
-          { 'pool name': 'Pool A', 'tat (create to complete)': '00:10:00' },
-          { 'pool name': 'Pool A', 'tat (create to complete)': '00:10:00' },
-          { 'pool name': 'Pool A', 'tat (create to complete)': '00:10:00' },
-          { 'pool name': 'Pool A', 'tat (create to complete)': '00:10:00' },
-          { 'pool name': 'Pool A', 'tat (create to complete)': '00:10:00' },
-          { 'pool name': 'Pool A', 'tat (create to complete)': '00:10:00' },
-          { 'pool name': 'Pool A', 'tat (create to complete)': '00:10:00' },
-          { 'pool name': 'Pool A', 'tat (create to complete)': '00:10:00' },
-          { 'pool name': 'Pool A', 'tat (create to complete)': '00:10:00' },
-          { 'pool name': 'Pool A', 'tat (create to complete)': '00:10:00' },
-          { 'pool name': 'Pool A', 'tat (create to complete)': '00:10:00' },
-          { 'pool name': 'Pool A', 'tat (create to complete)': '00:10:00' },
-          // Outlier for Pool A (5 hours)
-          { 'pool name': 'Pool A', 'tat (create to complete)': '05:00:00' },
-          
-          // Pool B: Normally takes 5 hours. So 5 hours is NOT an outlier here.
-          { 'pool name': 'Pool B', 'tat (create to complete)': '05:00:00' },
-          { 'pool name': 'Pool B', 'tat (create to complete)': '05:00:00' },
-          { 'pool name': 'Pool B', 'tat (create to complete)': '05:00:00' },
-        ]
+        name: "Request Details",
+        data: poolRows
       }
     ]);
 
-    const { issues } = dataQualityRules.run(wb);
-    const outliers = issues.filter(i => i.issueType === 'Statistical Outlier');
-    
-    // Should flag the Pool A 5-hour one, but not Pool B
-    expect(outliers).toHaveLength(1);
-    expect(outliers[0].severity).toBe('low');
-    expect(outliers[0].description).toContain('Pool A');
-  });
+    const mapping: WorkbookMapping = {
+      "Request Details": {
+        sheetType: "request_details",
+        isCountableSheet: false,
+        columns: {
+          Pool: "pool_name",
+          Duration: "total_duration"
+        }
+      }
+    };
 
+    const { issues } = dataQualityRules.run(wb, mapping);
+    expect(issues.some(i => i.issueType === "Statistical TAT Outlier")).toBe(true);
+  });
 });

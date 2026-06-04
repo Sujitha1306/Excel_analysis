@@ -1,237 +1,218 @@
 import { RuleModule } from './types';
-import { ParsedWorkbook, ParsedSheet, ValidationIssue, AffectedRow } from '../types';
-import { parseDuration } from '../../utils/time';
-import { detectOutliers } from '../../utils/stats';
-import { columnGuard } from '../utils';
+import { ParsedWorkbook, ValidationIssue } from '../types';
+import { WorkbookMapping, SheetMapping } from '../../ai/columnMapper';
+
+function findActualColumnByConcept(concept: string, mapping: SheetMapping): string | undefined {
+  if (!mapping || !mapping.columns) return undefined;
+  return Object.entries(mapping.columns).find(([_, c]) => c === concept)?.[0];
+}
+
+function parseDuration(val: any): number {
+  if (val === null || val === undefined || val === '') return 0;
+  const num = Number(val);
+  return isNaN(num) ? 0 : num;
+}
 
 export const dataQualityRules: RuleModule = {
   name: 'data-quality-rules',
-  
-  run: (wb: ParsedWorkbook) => {
+  run: (workbook: ParsedWorkbook, mapping: WorkbookMapping) => {
     const issues: ValidationIssue[] = [];
 
-    // Grouping collections
-    const missingValuesByReq: Record<string, AffectedRow[]> = {};
-    const ghostColumns: AffectedRow[] = [];
-    const whitespaceDetected: AffectedRow[] = [];
+    // Porter ID to Names map to check for discrepancies
+    const porterIdToNames = new Map<string, Set<string>>();
 
-    
-    // FR-29: track names mapped to IDs across the whole workbook
-    const porterIdToNames = new Map<string, Set<{ name: string, row: number, sheet: string }>>();
+    for (const sheet of workbook.sheets) {
+      const sheetMapping = mapping[sheet.sheetName];
+      if (!sheetMapping) continue;
 
-    // Per-pool TATs for FR-31
-    const poolTats = new Map<string, { val: number; sheetName: string; row: number }[]>();
+      const reqIdCol = findActualColumnByConcept('request_id', sheetMapping);
+      const porterNameCol = findActualColumnByConcept('porter_name', sheetMapping);
+      const porterIdCol = findActualColumnByConcept('porter_id', sheetMapping);
+      const poolNameCol = findActualColumnByConcept('pool_name', sheetMapping);
+      const locationCol = findActualColumnByConcept('location', sheetMapping);
+      const durationCol = findActualColumnByConcept('total_duration', sheetMapping);
 
-    for (const sheet of wb.sheets) {
-      sheet.data.forEach((row, rowIndex) => {
-        const displayRow = rowIndex + 2;
+      const durations: { rowNum: number, reqId?: string, val: number }[] = [];
 
-        // Collect porter IDs and names (FR-29)
-        const porterId = String(row['porter id'] || '').trim().toLowerCase();
-        const porterName = String(row['porter name'] || '');
+      sheet.data.forEach((row, i) => {
+        const rowNum = (sheet.headerRowIndex || 0) + i + 2;
+        const reqId = reqIdCol ? String(row[reqIdCol] || '').trim() : undefined;
         
-        if (porterId && porterName.trim()) {
+        const rawPorterName = porterNameCol ? String(row[porterNameCol] || '') : '';
+        const porterName = rawPorterName.trim();
+        const porterId = porterIdCol ? String(row[porterIdCol] || '').trim() : '';
+        
+        const rawPoolName = poolNameCol ? String(row[poolNameCol] || '') : '';
+        const poolName = rawPoolName.trim();
+
+        const location = locationCol ? String(row[locationCol] || '').trim() : '';
+
+        // LOW 1: Whitespace in Name Fields
+        if (porterNameCol && rawPorterName !== porterName && rawPorterName.length > 0) {
+          issues.push({
+            id: `ws-porter-${rowNum}`,
+            issueType: 'Whitespace in Name Fields',
+            category: 'LOW ERRORS',
+            sheetName: sheet.sheetName,
+            severity: 'low',
+            condition: 'No leading/trailing whitespace in names',
+            description: `Porter name has leading or trailing whitespace.`,
+            affectedRows: [{ rowNumber: rowNum, columnName: porterNameCol, actualValue: `"${rawPorterName}"`, expectedValue: `"${porterName}"`, requestId: reqId }],
+            affectedColumns: [porterNameCol],
+            totalAffectedRows: 1,
+            remediationSuggestion: 'Trim whitespace from the porter name.',
+            remediationType: 'auto',
+            source: 'rule'
+          });
+        }
+        if (poolNameCol && rawPoolName !== poolName && rawPoolName.length > 0) {
+          issues.push({
+            id: `ws-pool-${rowNum}`,
+            issueType: 'Whitespace in Name Fields',
+            category: 'LOW ERRORS',
+            sheetName: sheet.sheetName,
+            severity: 'low',
+            condition: 'No leading/trailing whitespace in names',
+            description: `Pool name has leading or trailing whitespace.`,
+            affectedRows: [{ rowNumber: rowNum, columnName: poolNameCol, actualValue: `"${rawPoolName}"`, expectedValue: `"${poolName}"`, requestId: reqId }],
+            affectedColumns: [poolNameCol],
+            totalAffectedRows: 1,
+            remediationSuggestion: 'Trim whitespace from the pool name.',
+            remediationType: 'auto',
+            source: 'rule'
+          });
+        }
+
+        // LOW 2: Missing Required Fields (assume Location or Pool missing is bad if request has ID)
+        if (reqId && reqId !== '') {
+          if (locationCol && location === '') {
+            issues.push({
+              id: `miss-loc-${rowNum}`,
+              issueType: 'Missing Required Fields',
+              category: 'LOW ERRORS',
+              sheetName: sheet.sheetName,
+              severity: 'low',
+              condition: 'Location should be present',
+              description: `Request is missing Location data.`,
+              affectedRows: [{ rowNumber: rowNum, columnName: locationCol, actualValue: 'Empty', expectedValue: 'Valid Location', requestId: reqId }],
+              affectedColumns: [locationCol],
+              totalAffectedRows: 1,
+              remediationSuggestion: 'Add the missing location.',
+              remediationType: 'manual',
+              source: 'rule'
+            });
+          }
+          if (poolNameCol && poolName === '') {
+            issues.push({
+              id: `miss-pool-${rowNum}`,
+              issueType: 'Missing Required Fields',
+              category: 'LOW ERRORS',
+              sheetName: sheet.sheetName,
+              severity: 'low',
+              condition: 'Pool should be present',
+              description: `Request is missing Pool data.`,
+              affectedRows: [{ rowNumber: rowNum, columnName: poolNameCol, actualValue: 'Empty', expectedValue: 'Valid Pool Name', requestId: reqId }],
+              affectedColumns: [poolNameCol],
+              totalAffectedRows: 1,
+              remediationSuggestion: 'Add the missing pool name.',
+              remediationType: 'manual',
+              source: 'rule'
+            });
+          }
+        }
+
+        // Record for LOW 3 (Porter ID to Names)
+        if (porterId !== '' && porterName !== '') {
           if (!porterIdToNames.has(porterId)) {
             porterIdToNames.set(porterId, new Set());
           }
-          porterIdToNames.get(porterId)!.add({ name: porterName.trim(), row: displayRow, sheet: sheet.sheetName });
+          porterIdToNames.get(porterId)!.add(porterName);
         }
 
-        // FR-24: Blank required fields
-        const requiredFields = ['porter name', 'requestid', 'start time', 'end time', 'status', 'pool name'];
-        for (const req of requiredFields) {
-          if (row.hasOwnProperty(req)) {
-            const val = String(row[req] || '');
-            if (val.trim() === '') {
-              const key = `${sheet.sheetName}-${req}`;
-              if (!missingValuesByReq[key]) missingValuesByReq[key] = [];
-              missingValuesByReq[key].push({
-                rowNumber: displayRow,
-                columnName: req,
-                actualValue: val,
-                expectedValue: 'Non-empty value'
-              });
-            }
-          }
-        }
-
-        // Check all string fields for whitespace issues (FR-25, FR-26, FR-27)
-        for (const [key, val] of Object.entries(row)) {
-          if (typeof val === 'string') {
-            // FR-27: Ghost columns
-            if (key.toLowerCase().startsWith('__empty') && val.trim() !== '') {
-              ghostColumns.push({
-                rowNumber: displayRow,
-                columnName: key,
-                actualValue: val
-              });
-            }
-
-            // FR-25 & FR-26 Whitespace logic
-            const strValue = String(val);
-            const trimmed = strValue.trim();
-
-            if (
-              val !== null && 
-              val !== undefined && 
-              strValue !== '' &&
-              strValue !== trimmed && 
-              (key.includes('name') || key.includes('category') || trimmed === '') // Flag if name/category has spaces, or if it's purely whitespace
-            ) {
-              whitespaceDetected.push({
-                rowNumber: displayRow,
-                columnName: key,
-                actualValue: strValue,
-                expectedValue: trimmed
-              });
-            }
-          }
-        }
-
-        if (sheet.type === 'Request Details') {
-          const pool = String(row['pool name'] || '').trim();
-          const tatStr = String(row['tat (create to complete)'] || '').trim();
-          if (pool && tatStr) {
-            const tatSec = parseDuration(tatStr);
-            if (tatSec > 0) {
-              if (!poolTats.has(pool)) poolTats.set(pool, []);
-              poolTats.get(pool)!.push({ val: tatSec, sheetName: sheet.sheetName, row: displayRow });
-            }
+        // Record for LOW 5 (Statistical Outlier)
+        if (durationCol) {
+          const val = parseDuration(row[durationCol]);
+          if (val > 0) {
+            durations.push({ rowNum, reqId, val });
           }
         }
       });
-    }
 
-    // Process FR-24 (Missing Values)
-    for (const [key, rows] of Object.entries(missingValuesByReq)) {
-      if (rows.length > 0) {
-        const [sheetName, req] = key.split('-');
-        issues.push({
-          id: `DQ-24-${key}`,
-          issueType: 'Missing Values',
-          category: 'Data Completeness',
-          sheetName,
-          severity: 'medium',
-          condition: 'Value is NULL or Empty',
-          description: `Required field '${req}' is missing.`,
-          affectedRows: rows,
-          affectedColumns: [req],
-          totalAffectedRows: rows.length,
-          remediationSuggestion: `Provide the missing value for ${req}.`,
-          remediationType: 'manual',
-          source: 'rule'
+      // LOW 4: Ghost Columns
+      // Look for empty headers or '__EMPTY' headers in normalized headers
+      if (sheet.headers) {
+        sheet.headers.forEach((header, i) => {
+          if (header === '' || header.includes('__empty')) {
+            issues.push({
+              id: `ghost-col-${i}`,
+              issueType: 'Ghost Columns',
+              category: 'LOW ERRORS',
+              sheetName: sheet.sheetName,
+              severity: 'low',
+              condition: 'All columns should have valid headers',
+              description: `Found ghost column with no valid header at index ${i}.`,
+              affectedRows: [{ rowNumber: 'Summary level', columnName: header || `Column ${i+1}`, actualValue: 'Empty Header', expectedValue: 'Valid Header Name' }],
+              affectedColumns: [header || `Column ${i+1}`],
+              totalAffectedRows: sheet.rowCount,
+              remediationSuggestion: 'Remove empty columns from the sheet.',
+              remediationType: 'manual',
+              source: 'rule'
+            });
+          }
         });
       }
-    }
 
-    // Process FR-27 (Ghost Columns)
-    if (ghostColumns.length > 0) {
-      issues.push({
-        id: `DQ-27-all`,
-        issueType: 'Ghost Column',
-        category: 'Data Quality',
-        sheetName: 'Multiple',
-        severity: 'medium',
-        condition: 'Column contains data but has no header',
-        description: `Ghost columns detected: Data found in columns without a header.`,
-        affectedRows: ghostColumns,
-        affectedColumns: Array.from(new Set(ghostColumns.map(r => r.columnName))),
-        totalAffectedRows: ghostColumns.length,
-        remediationSuggestion: `Remove the ghost columns or provide valid headers.`,
-        remediationType: 'manual',
-        source: 'rule'
-      });
-    }
+      // LOW 5: Statistical TAT Outlier
+      if (durations.length > 5) {
+        const sum = durations.reduce((a, b) => a + b.val, 0);
+        const mean = sum / durations.length;
+        const squareDiffs = durations.map(d => Math.pow(d.val - mean, 2));
+        const variance = squareDiffs.reduce((a, b) => a + b, 0) / durations.length;
+        const stdDev = Math.sqrt(variance);
 
-    // Process FR-26 (Leading/Trailing Whitespace)
-    if (whitespaceDetected.length > 0) {
-      issues.push({
-        id: `DQ-26-all`,
-        issueType: 'Whitespace Issue',
-        category: 'Data Quality',
-        sheetName: 'Multiple',
-        severity: 'medium',
-        condition: 'Extraneous whitespace detected',
-        description: `Fields have leading/trailing spaces or contain only whitespace.`,
-        affectedRows: whitespaceDetected,
-        affectedColumns: Array.from(new Set(whitespaceDetected.map(r => r.columnName))),
-        totalAffectedRows: whitespaceDetected.length,
-        remediationSuggestion: `Trim the whitespace from these fields.`,
-        remediationType: 'auto',
-        source: 'rule'
-      });
-    }
-
-    // FR-29: Inconsistent names for same ID
-    const inconsistentPorterRows: AffectedRow[] = [];
-    for (const [id, entries] of Array.from(porterIdToNames.entries())) {
-      const distinctNames = Array.from(new Set(Array.from(entries).map(e => e.name)));
-      if (distinctNames.length > 1) {
-        entries.forEach(e => {
-          inconsistentPorterRows.push({
-            rowNumber: e.row,
-            columnName: 'porter name',
-            actualValue: `${id} -> ${e.name}`
-          });
-        });
-      }
-    }
-
-    if (inconsistentPorterRows.length > 0) {
-      issues.push({
-        id: `DQ-29-all`,
-        issueType: 'Data Inconsistency',
-        category: 'Data Quality',
-        sheetName: 'Multiple',
-        severity: 'medium',
-        condition: 'Same Porter ID maps to different names',
-        description: `Porter IDs are mapped to multiple different names across the workbook.`,
-        affectedRows: inconsistentPorterRows,
-        affectedColumns: ['porter id', 'porter name'],
-        totalAffectedRows: inconsistentPorterRows.length,
-        remediationSuggestion: `Standardize the porter's name across all sheets.`,
-        remediationType: 'manual',
-        source: 'rule'
-      });
-    }
-
-    // FR-31: Statistical outliers per pool
-    const outlierRows: AffectedRow[] = [];
-    for (const [pool, items] of Array.from(poolTats.entries())) {
-      const values = items.map(i => i.val);
-      const outlierVals = detectOutliers(values, 3);
-      
-      if (outlierVals.length > 0) {
-        for (const outVal of outlierVals) {
-          const matchingItems = items.filter(i => i.val === outVal);
-          for (const match of matchingItems) {
-            outlierRows.push({
-              rowNumber: match.row,
-              columnName: 'tat (create to complete)',
-              actualValue: `${outVal}s (Pool: ${pool})`
+        const outlierThreshold = mean + (3 * stdDev);
+        for (const d of durations) {
+          if (d.val > outlierThreshold) {
+            issues.push({
+              id: `outlier-${d.rowNum}`,
+              issueType: 'Statistical TAT Outlier',
+              category: 'LOW ERRORS',
+              sheetName: sheet.sheetName,
+              severity: 'low',
+              condition: 'Duration within 3 std devs of mean',
+              description: `Duration (${d.val}) is > 3 standard deviations above the mean (${mean.toFixed(2)}).`,
+              affectedRows: [{ rowNumber: d.rowNum, columnName: durationCol!, actualValue: d.val, expectedValue: `<= ${outlierThreshold.toFixed(2)}`, requestId: d.reqId }],
+              affectedColumns: [durationCol!],
+              totalAffectedRows: 1,
+              remediationSuggestion: 'Review this request for unusual delays.',
+              remediationType: 'review',
+              source: 'rule'
             });
           }
         }
       }
     }
 
-    if (outlierRows.length > 0) {
-      issues.push({
-        id: `DQ-31-all`,
-        issueType: 'Statistical Outlier',
-        category: 'Data Quality',
-        sheetName: wb.sheets.find(s => s.type === 'Request Details')?.sheetName || 'Request Details',
-        severity: 'low',
-        condition: 'TAT value exceeds 3 standard deviations',
-        description: `TAT values are statistical outliers (>3 standard deviations from their pool mean).`,
-        affectedRows: outlierRows,
-        affectedColumns: ['tat (create to complete)', 'pool name'],
-        totalAffectedRows: outlierRows.length,
-        remediationSuggestion: `Review these requests for data entry errors or exceptional delays.`,
-        remediationType: 'review',
-        source: 'rule'
-      });
-    }
+    // Process LOW 3
+    Array.from(porterIdToNames.entries()).forEach(([porterId, names]) => {
+      if (names.size > 1) {
+        issues.push({
+          id: `porter-map-${porterId}`,
+          issueType: 'Porter ID Maps to Different Names',
+          category: 'LOW ERRORS',
+          sheetName: 'Multiple',
+          severity: 'low',
+          condition: 'One ID = One Name',
+          description: `Porter ID ${porterId} maps to multiple names: ${Array.from(names).join(', ')}.`,
+          affectedRows: [{ rowNumber: 'Summary level', columnName: 'Porter ID/Name', actualValue: Array.from(names).join(', '), expectedValue: 'Single Name' }],
+          affectedColumns: ['Porter ID/Name'],
+          totalAffectedRows: 1,
+          remediationSuggestion: 'Consolidate the porter names for this ID.',
+          remediationType: 'manual',
+          source: 'rule'
+        });
+      }
+    });
 
     return { issues };
   }

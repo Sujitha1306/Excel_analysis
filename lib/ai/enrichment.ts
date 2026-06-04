@@ -27,7 +27,7 @@ export async function enrichValidationReport(report: ValidationReport): Promise<
 
   try {
     const model = ai.getGenerativeModel({ 
-      model: 'gemini-1.5-flash',
+      model: 'gemini-2.5-flash',
       generationConfig: { responseMimeType: "application/json" }
     });
     
@@ -58,7 +58,14 @@ Respond ONLY with a JSON object matching this schema:
   ]
 }`;
 
-    const result = await model.generateContent(prompt);
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Gemini timeout')), 60000)
+    );
+
+    const result = await Promise.race([
+      model.generateContent(prompt),
+      timeoutPromise
+    ]);
     const responseText = result.response.text();
     const parsed = JSON.parse(responseText);
     

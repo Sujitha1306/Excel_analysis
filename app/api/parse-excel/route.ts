@@ -63,11 +63,15 @@ export async function POST(request: Request) {
       const normalizedRows = jsonRows.map(normalizeKeys);
       const colCount = headers.length || (normalizedRows[0] ? Object.keys(normalizedRows[0]).length : 0);
 
+      const normalizedHeaders = headers.map(h => String(h ?? "").trim());
+
       parsedSheets.push({
         sheetName,
         type: sheetType,
         rowCount: normalizedRows.length,
         colCount,
+        headerRowIndex,
+        headers: normalizedHeaders,
         data: normalizedRows,
       });
     }

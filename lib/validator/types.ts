@@ -3,10 +3,11 @@ export type IssueSource = 'rule' | 'ai';
 export type RemediationType = 'auto' | 'manual' | 'review';
 
 export interface AffectedRow {
-  rowNumber: number;
+  rowNumber: number | 'Summary level';
   columnName: string;
   actualValue: unknown;
   expectedValue?: string;
+  requestId?: string;
 }
 
 export interface ValidationIssue {
@@ -31,6 +32,8 @@ export interface ParsedSheet {
   type: string;
   rowCount: number;
   colCount: number;
+  headerRowIndex?: number;
+  headers?: string[];
   data: any[]; // The raw JSON rows
 }
 

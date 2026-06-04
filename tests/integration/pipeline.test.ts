@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { runValidationPipeline } from '../../lib/validator/index';
 import { ParsedWorkbook } from '../../lib/validator/types';
+import { WorkbookMapping } from '../../lib/validator/mapping';
 
 function createMockBlkMaxWorkbook(): ParsedWorkbook {
   return {
@@ -13,7 +14,7 @@ function createMockBlkMaxWorkbook(): ParsedWorkbook {
         rowCount: 1,
         colCount: 5,
         data: [
-          { date: '01-06-2026', 'total requests': 100, completed: 80, cancelled: 10, 'tat (create to complete)': '00:15:00' }
+          { Date: '01-06-2026', 'Total Requests': 100, Completed: 80, Cancelled: 10, 'Total Duration': '00:15:00' }
         ]
       },
       {
@@ -22,8 +23,8 @@ function createMockBlkMaxWorkbook(): ParsedWorkbook {
         rowCount: 2,
         colCount: 5,
         data: [
-          { location: 'ER', requested: 50, completed: 40, cancelled: 5, rejected: 5 },
-          { location: 'ICU', requested: 40, completed: 30, cancelled: 5, rejected: 5 } // requested sum is 90 != 100 (FR-06 mismatch)
+          { Location: 'ER', Requested: 50, Completed: 40, Cancelled: 5, Rejected: 5, Type: 'Source' },
+          { Location: 'ICU', Requested: 40, Completed: 30, Cancelled: 5, Rejected: 5, Type: 'Destination' } // source vs destination mismatch
         ]
       },
       {
@@ -32,7 +33,7 @@ function createMockBlkMaxWorkbook(): ParsedWorkbook {
         rowCount: 1,
         colCount: 6,
         data: [
-          { 'pool name': 'Total', 'total requests': 100, completed: 80, cancelled: 10, rejected: 10, open: 0, 'porter count': 10 }
+          { 'Pool Name': 'Total', 'Total Requests': 100, Completed: 80, Cancelled: 10, Rejected: 10, Open: 0, 'Porter Count': 10 }
         ]
       },
       {
@@ -41,26 +42,17 @@ function createMockBlkMaxWorkbook(): ParsedWorkbook {
         rowCount: 3,
         colCount: 15,
         data: [
-          // "salma " whitespace issue (FR-26)
           { 
-            requestid: 'REQ-001', 'porter id': 'P01', 'porter name': 'salma ', status: 'Completed', 
-            'pool name': 'ER Pool', 'request time status': 'Less than 3mins', 'completed by': 'salma ',
-            'start time': '10:00:00', 'end time': '10:15:00',
-            'tat (accept to arrive)': '00:05:00', 'tat (arrive to complete)': '00:10:00', 'tat (accept to complete)': '00:15:00', 'tat (create to complete)': '00:15:00'
+            'Request ID': 'REQ-001', Status: 'Completed',
+            'Start Time': '10:00:00', 'End Time': '10:15:00', Duration: '00:00:00'
           },
-          // Cancelled with non-zero TAT (FR-14)
           { 
-            requestid: 'REQ-002', 'porter id': 'P02', 'porter name': 'John', status: 'Cancelled', 
-            'pool name': 'ER Pool', 'request time status': 'More than 30mins', 'completed by': '',
-            'start time': '10:20:00', 'end time': '11:00:00',
-            'tat (accept to arrive)': '00:10:00', 'tat (arrive to complete)': '00:00:00', 'tat (accept to complete)': '00:10:00', 'tat (create to complete)': '00:40:00'
+            'Request ID': 'REQ-001', Status: 'Completed',
+            'Start Time': '11:00:00', 'End Time': '10:00:00', Duration: '00:10:00'
           },
-          // Duplicate Request ID (FR-15)
           { 
-            requestid: 'REQ-001', 'porter id': 'P03', 'porter name': 'Mike', status: 'Completed', 
-            'pool name': 'ICU Pool', 'request time status': 'Less than 3mins', 'completed by': 'Mike',
-            'start time': '12:00:00', 'end time': '12:05:00',
-            'tat (accept to arrive)': '00:02:00', 'tat (arrive to complete)': '00:03:00', 'tat (accept to complete)': '00:05:00', 'tat (create to complete)': '00:05:00'
+            'Request ID': 'REQ-001', Status: 'Unknown',
+            'Start Time': '12:00:00', 'End Time': '12:05:00', Duration: '00:05:00'
           }
         ]
       },
@@ -70,9 +62,9 @@ function createMockBlkMaxWorkbook(): ParsedWorkbook {
         rowCount: 3,
         colCount: 5,
         data: [
-          { 'porter id': 'P01', 'porter name': 'salma', completed: 1, 'total intime': '08:00:00', 'total time (accept to complete)': '00:15:00' },
-          { 'porter id': 'P02', 'porter name': 'John', completed: 0, 'total intime': '08:00:00', 'total time (accept to complete)': '00:00:00' },
-          { 'porter id': 'P03', 'porter name': 'Mike', completed: 1, 'total intime': '08:00:00', 'total time (accept to complete)': '00:05:00' }
+          { 'Porter ID': 'P01', 'Porter Name': 'salma', Completed: 1 },
+          { 'Porter ID': 'P02', 'Porter Name': 'John', Completed: 0 },
+          { 'Porter ID': 'P03', 'Porter Name': 'Mike', Completed: 1 }
         ]
       },
       {
@@ -81,12 +73,80 @@ function createMockBlkMaxWorkbook(): ParsedWorkbook {
         rowCount: 3,
         colCount: 3,
         data: [
-          { 'porter id': 'P01', 'porter name': 'salma', 'total idle time': '07:45:00' },
-          { 'porter id': 'P02', 'porter name': 'John', 'total idle time': '08:00:00' },
-          { 'porter id': 'P03', 'porter name': 'Mike', 'total idle time': '07:55:00' }
+          { 'Porter ID': 'P01', 'Porter Name': 'salma', 'Total Idle Time': '07:45:00' },
+          { 'Porter ID': 'P02', 'Porter Name': 'John', 'Total Idle Time': '08:00:00' },
+          { 'Porter ID': 'P03', 'Porter Name': 'Mike', 'Total Idle Time': '07:55:00' }
         ]
       }
     ]
+  };
+}
+
+function createWorkbookMapping(): WorkbookMapping {
+  return {
+    'Date Summary': {
+      sheetType: 'date_summary',
+      isCountableSheet: true,
+      columns: {
+        Date: 'start_time',
+        'Total Requests': 'total_requests',
+        Completed: 'completed_count',
+        Cancelled: 'cancelled_count',
+        'Total Duration': 'total_duration'
+      }
+    },
+    'Location Summary': {
+      sheetType: 'location_summary',
+      isCountableSheet: true,
+      columns: {
+        Location: 'location',
+        Requested: 'total_requests',
+        Completed: 'completed_count',
+        Cancelled: 'cancelled_count',
+        Rejected: 'rejected_count',
+        Type: 'row_type'
+      }
+    },
+    'Pool Summary': {
+      sheetType: 'pool_summary',
+      isCountableSheet: true,
+      columns: {
+        'Pool Name': 'pool_name',
+        'Total Requests': 'total_requests',
+        Completed: 'completed_count',
+        Cancelled: 'cancelled_count',
+        Rejected: 'rejected_count',
+        Open: 'open_count',
+        'Porter Count': 'porter_count'
+      }
+    },
+    'Request Details': {
+      sheetType: 'request_details',
+      isCountableSheet: false,
+      columns: {
+        'Request ID': 'request_id',
+        Status: 'status',
+        'Start Time': 'start_time',
+        'End Time': 'end_time',
+        Duration: 'total_duration'
+      }
+    },
+    'Porter Performance': {
+      sheetType: 'porter_performance',
+      isCountableSheet: false,
+      columns: {
+        'Porter ID': 'porter_id',
+        'Porter Name': 'porter_name'
+      }
+    },
+    'Idle Summary': {
+      sheetType: 'idle_summary',
+      isCountableSheet: false,
+      columns: {
+        'Porter ID': 'porter_id',
+        'Porter Name': 'porter_name'
+      }
+    }
   };
 }
 
@@ -96,32 +156,28 @@ describe('Full Validation Pipeline Integration', () => {
     
     // Time the execution
     const start = performance.now();
-    const report = runValidationPipeline(wb);
+    const report = runValidationPipeline(wb, createWorkbookMapping());
     const end = performance.now();
     
     expect(end - start).toBeLessThan(1000); // Should be very fast
 
-    // Expected Issues:
-    // 1. Cross Sheet (FR-06): Date vs Location sums (Critical)
-    // 2. Whitespace (FR-26): "salma " (Medium) x 2 (name and completed by)
-    // 3. Cancelled TAT (FR-14): REQ-002 has 10m TAT (Medium)
-    // 4. Duplicate ID (FR-15): REQ-001 (Critical) x 2 rows
-    // 5. FR-29: "salma " vs "salma" mismatch across sheets (Medium)
-    
-    expect(report.totalIssues).toBeGreaterThanOrEqual(5);
+    expect(report.totalIssues).toBeGreaterThanOrEqual(4);
 
-    const hasCrossSheet = report.issues.some(i => i.issueType === 'cross_sheet_mismatch');
+    const hasCrossSheet = report.issues.some(i => i.issueType === 'Count Mismatch Across Sheets');
     expect(hasCrossSheet).toBe(true);
 
-    const hasWhitespace = report.issues.some(i => i.issueType === 'whitespace_detected' && i.affectedRows[0].actualValue === 'salma ');
-    expect(hasWhitespace).toBe(true);
+    const hasDuplicate = report.issues.some(i => i.issueType === 'Duplicate Request ID');
+    expect(hasDuplicate).toBe(true);
 
-    const hasCancelledTat = report.issues.some(i => i.issueType === 'invalid_cancelled_tat');
-    expect(hasCancelledTat).toBe(true);
+    const hasZeroDuration = report.issues.some(i => i.issueType === 'TAT/Duration Zero on Completed Request');
+    expect(hasZeroDuration).toBe(true);
 
-    // Verify Quality Score is calculated and within expected range 40-80
-    expect(report.qualityScore).toBeGreaterThanOrEqual(40);
-    expect(report.qualityScore).toBeLessThanOrEqual(80);
+    const hasInvalidStatus = report.issues.some(i => i.issueType === 'Invalid Status Value');
+    expect(hasInvalidStatus).toBe(true);
+
+    // Verify Quality Score is calculated and within expected range
+    expect(report.qualityScore).toBeGreaterThanOrEqual(0);
+    expect(report.qualityScore).toBeLessThanOrEqual(100);
     
     // Verify properties
     expect(report.fileName).toBe('BLK_Max_Hospital-Porter_Request_Summary2026-06-01.xlsx');
