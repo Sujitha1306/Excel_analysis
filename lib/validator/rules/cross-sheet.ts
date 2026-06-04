@@ -34,7 +34,13 @@ export const crossSheetRules: RuleModule = {
     const mappedSheets = workbook.sheets.map(sheet => ({
       sheet,
       mapping: mapping[sheet.sheetName]
-    })).filter(s => s.mapping && Object.keys(s.mapping.columns).length > 0);
+    })).filter(s => {
+      if (!s.mapping || Object.keys(s.mapping.columns).length === 0) return false;
+      const lowerName = s.sheet.sheetName.toLowerCase();
+      // Only ignore 'porter individual' summaries (not aggregate summaries)
+      if (lowerName.includes('porter') && lowerName.includes('individual')) return false;
+      return true;
+    });
 
     // Group sheets by concept to compare
     const conceptValues: Record<string, { sheetName: string, value: number, actualColumn: string }[]> = {};
@@ -47,35 +53,41 @@ export const crossSheetRules: RuleModule = {
         (locationCol && rowTypeCol && sheet.data.some(r => r[rowTypeCol]));
 
       if (isLocationSummary && rowTypeCol) {
-        let sourceCount = 0;
-        let destCount = 0;
-        sheet.data.forEach(row => {
-          const type = String(row[rowTypeCol] ?? '').trim().toLowerCase();
-          if (type === 'source') sourceCount++;
-          if (type === 'destination') destCount++;
-        });
-
-        if (sourceCount !== destCount) {
-          issues.push({
-            id: `cs-loc-mismatch`,
-            issueType: 'Location Source/Destination Mismatch',
-            category: 'CRITICAL ERRORS',
-            sheetName: sheet.sheetName,
-            severity: 'critical',
-            condition: `Source count (${sourceCount}) == Destination count (${destCount})`,
-            description: 'Source total must equal Destination total in Location Summary',
-            affectedRows: [{
-              rowNumber: 'Summary level',
-              columnName: rowTypeCol,
-              actualValue: `Source: ${sourceCount}, Dest: ${destCount}`,
-              expectedValue: 'Equal counts'
-            }],
-            affectedColumns: [rowTypeCol],
-            totalAffectedRows: 1,
-            remediationSuggestion: 'Ensure every request has both a Source and Destination row in the summary.',
-            remediationType: 'manual',
-            source: 'rule'
+        const reqCol = findActualColumnByConcept('total_requests', sheetMapping);
+        if (reqCol) {
+          let sourceSum = 0;
+          let destSum = 0;
+          sheet.data.forEach(row => {
+            const type = String(row[rowTypeCol] ?? '').trim().toLowerCase();
+            const val = Number(row[reqCol]);
+            if (!isNaN(val)) {
+              if (type === 'source') sourceSum += val;
+              if (type === 'destination') destSum += val;
+            }
           });
+
+          if (sourceSum !== destSum) {
+            issues.push({
+              id: `cs-loc-mismatch`,
+              issueType: 'Count Mismatch Across Sheets',
+              category: 'CRITICAL ERRORS',
+              sheetName: sheet.sheetName,
+              severity: 'critical',
+              condition: `Source sum (${sourceSum}) == Destination sum (${destSum})`,
+              description: 'Source total must equal Destination total (internal check)',
+              affectedRows: [{
+                rowNumber: 'Summary level',
+                columnName: reqCol,
+                actualValue: `Source: ${sourceSum}, Dest: ${destSum}`,
+                expectedValue: 'Equal sums'
+              }],
+              affectedColumns: [reqCol, rowTypeCol],
+              totalAffectedRows: 1,
+              remediationSuggestion: 'Ensure every request has both a Source and Destination value.',
+              remediationType: 'manual',
+              source: 'rule'
+            });
+          }
         }
       }
 
@@ -137,18 +149,26 @@ export const crossSheetRules: RuleModule = {
               id: `cs-count-${concept}-${i}`,
               issueType: 'Count Mismatch Across Sheets',
               category: 'CRITICAL ERRORS',
-              sheetName: current.sheetName,
+              sheetName: `${first.sheetName} ↔ ${current.sheetName}`,
               severity: 'critical',
-              condition: `Total ${concept} matches across all sheets`,
-              description: `Total ${concept} in ${current.sheetName} (${current.value}) does not match ${first.sheetName} (${first.value})`,
-              affectedRows: [{
-                rowNumber: 'Summary level',
-                columnName: current.actualColumn,
-                actualValue: current.value,
-                expectedValue: String(first.value)
-              }],
-              affectedColumns: [current.actualColumn, first.actualColumn],
-              totalAffectedRows: 1,
+              condition: `${concept} must be equal across all sheets`,
+              description: `${first.sheetName} shows ${first.value} but ${current.sheetName} shows ${current.value} for the same metric. These must be identical as they represent the same data from different views.`,
+              affectedRows: [
+                {
+                  rowNumber: 'Summary level',
+                  columnName: `${first.actualColumn} (in ${first.sheetName})`,
+                  actualValue: String(first.value),
+                  expectedValue: String(current.value)
+                },
+                {
+                  rowNumber: 'Summary level',
+                  columnName: `${current.actualColumn} (in ${current.sheetName})`,
+                  actualValue: String(current.value),
+                  expectedValue: String(first.value)
+                }
+              ],
+              affectedColumns: [first.actualColumn, current.actualColumn],
+              totalAffectedRows: 2,
               remediationSuggestion: 'Check if any requests were omitted or double-counted in one of the sheets.',
               remediationType: 'manual',
               source: 'rule'

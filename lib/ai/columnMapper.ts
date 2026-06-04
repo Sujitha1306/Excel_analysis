@@ -25,8 +25,10 @@ const CONCEPT_PATTERNS: Record<string, string[]> = {
     'create to complete', 'duration(create to complete)'
   ],
   create_to_accept: [
-    'create to accept', 'tat:create to accept',
-    'waiting duration', 'wait time'
+    'create to accept', 'tat:create to accept'
+  ],
+  wait_time: [
+    'waiting duration', 'wait time', 'waitlist to create', 'queue time'
   ],
   accept_to_arrive: [
     'accept to arrive', 'tat (accept to arrive)',
@@ -54,6 +56,10 @@ function heuristicMap(headers: string[]): Record<string, string> {
   const result: Record<string, string> = {};
   headers.forEach(header => {
     const h = header.toLowerCase().trim();
+    
+    // Ignore self request TAT columns
+    if (h.includes('self')) return;
+    
     let bestConcept = '';
     let longestMatch = 0;
     
@@ -176,6 +182,7 @@ are the mapping objects in this exact format:
 Only map columns you are confident about.
 Skip columns you cannot identify.
 Never map string columns to countable concepts.
+CRITICAL: Do NOT map any columns containing the word "self" (e.g., "TAT:SELF" or "selfrequest") to any time/duration concepts. Ignore them.
 Return ONLY valid JSON, no markdown, no explanation.
   `;
 

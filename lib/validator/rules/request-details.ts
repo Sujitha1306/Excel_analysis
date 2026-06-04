@@ -1,16 +1,11 @@
 import { RuleModule } from './types';
 import { ParsedWorkbook, ValidationIssue } from '../types';
 import { WorkbookMapping, SheetMapping, getColumnValue } from '../../ai/columnMapper';
+import { parseDuration, formatDuration } from '../../utils/time';
 
 function findActualColumnByConcept(concept: string, mapping: SheetMapping): string | undefined {
   if (!mapping || !mapping.columns) return undefined;
   return Object.entries(mapping.columns).find(([_, c]) => c === concept)?.[0];
-}
-
-function parseDuration(val: any): number {
-  if (val === null || val === undefined || val === '') return 0;
-  const num = Number(val);
-  return isNaN(num) ? 0 : num;
 }
 
 export const requestDetailsRules: RuleModule = {
@@ -28,6 +23,7 @@ export const requestDetailsRules: RuleModule = {
       const endCol = findActualColumnByConcept('end_time', sheetMapping);
       const durationCol = findActualColumnByConcept('total_duration', sheetMapping);
       
+      const waitTimeCol = findActualColumnByConcept('wait_time', sheetMapping);
       const createToAcceptCol = findActualColumnByConcept('create_to_accept', sheetMapping);
       const acceptToArriveCol = findActualColumnByConcept('accept_to_arrive', sheetMapping);
       const arriveToCompleteCol = findActualColumnByConcept('arrive_to_complete', sheetMapping);
@@ -41,7 +37,105 @@ export const requestDetailsRules: RuleModule = {
         const start = startCol ? row[startCol] : null;
         const end = endCol ? row[endCol] : null;
         const duration = durationCol ? row[durationCol] : null;
-        const parsedDuration = parseDuration(duration);
+        const durationSeconds = parseDuration(duration);
+
+        // CHECK A: TAT/Duration Zero on Completed Request
+        if (status === 'completed' && durationSeconds === 0) {
+          issues.push({
+            id: `zero-dur-${rowNum}`,
+            issueType: 'TAT/Duration Zero on Completed Request',
+            category: 'CRITICAL ERRORS',
+            sheetName: sheet.sheetName,
+            severity: 'critical',
+            condition: 'Completed requests must have total_duration > 0',
+            description: `Request is marked Completed but total duration is zero. A completed request must have a positive time duration.`,
+            affectedRows: [{ rowNumber: rowNum, columnName: durationCol!, actualValue: formatDuration(durationSeconds), expectedValue: '> 00:00:00', requestId: reqId }],
+            affectedColumns: [durationCol!, statusCol!],
+            totalAffectedRows: 1,
+            remediationSuggestion: 'Check if timestamps were recorded properly.',
+            remediationType: 'manual',
+            source: 'rule'
+          });
+        }
+
+        // CHECK B: Start/End time difference vs recorded duration
+        if (start && end && durationCol) {
+          const startDate = new Date(String(start));
+          const endDate = new Date(String(end));
+          
+          if (!isNaN(startDate.getTime()) && !isNaN(endDate.getTime())) {
+            const calculatedSeconds = (endDate.getTime() - startDate.getTime()) / 1000;
+            
+            if (calculatedSeconds < 0) {
+              issues.push({
+                id: `neg-dur-${rowNum}`,
+                issueType: 'Negative Duration',
+                category: 'CRITICAL ERRORS',
+                sheetName: sheet.sheetName,
+                severity: 'critical',
+                condition: 'Duration >= 0',
+                description: 'End time is before Start time which is physically impossible.',
+                affectedRows: [{ rowNumber: rowNum, columnName: startCol!, actualValue: String(start), expectedValue: `<= ${end}`, requestId: reqId }],
+                affectedColumns: [startCol!, endCol!],
+                totalAffectedRows: 1,
+                remediationSuggestion: 'Correct the start and end timestamps.',
+                remediationType: 'manual',
+                source: 'rule'
+              });
+            } else {
+              const diff = Math.abs(calculatedSeconds - durationSeconds);
+              if (diff > 60) {
+                issues.push({
+                  id: `dur-mismatch-${rowNum}`,
+                  issueType: 'Duration Mismatch',
+                  category: 'CRITICAL ERRORS',
+                  sheetName: sheet.sheetName,
+                  severity: 'critical',
+                  condition: 'Calculated duration must match recorded duration',
+                  description: `The recorded duration does not match the difference between Start and End times. Calculated: ${formatDuration(calculatedSeconds)}, Recorded: ${formatDuration(durationSeconds)}`,
+                  affectedRows: [{ rowNumber: rowNum, columnName: durationCol, actualValue: formatDuration(durationSeconds), expectedValue: formatDuration(calculatedSeconds), requestId: reqId }],
+                  affectedColumns: [startCol!, endCol!, durationCol],
+                  totalAffectedRows: 1,
+                  remediationSuggestion: 'Verify the formula or logic used to calculate the recorded duration.',
+                  remediationType: 'manual',
+                  source: 'rule'
+                });
+              }
+            }
+          }
+        }
+
+        // CHECK C: TAT Components Don't Sum to Total
+        if (durationCol) {
+          const availableCols = [waitTimeCol, createToAcceptCol, acceptToArriveCol, arriveToCompleteCol].filter(Boolean) as string[];
+          
+          if (availableCols.length > 1) { // Need at least 2 components to make a sum meaningful
+            const rawVals = availableCols.map(col => String(row[col] ?? '').trim());
+
+            // Only validate sum if all available components actually have data
+            if (rawVals.every(val => val !== '')) {
+              const componentSum = rawVals.reduce((sum, val) => sum + parseDuration(val), 0);
+              
+              if (Math.abs(componentSum - durationSeconds) > 60) {
+                issues.push({
+                  id: `sum-dur-${rowNum}`,
+                  issueType: "TAT Components Don't Sum to Total",
+                  category: 'CRITICAL ERRORS',
+                  sheetName: sheet.sheetName,
+                  severity: 'critical',
+                  condition: 'Sum of components == total_duration',
+                  description: `The sum of TAT components (${availableCols.join(' + ')}) does not equal the total duration. Components sum to ${formatDuration(componentSum)} but total shows ${formatDuration(durationSeconds)}.`,
+                  affectedRows: [{ rowNumber: rowNum, columnName: durationCol, actualValue: formatDuration(durationSeconds), expectedValue: formatDuration(componentSum), requestId: reqId }],
+                  affectedColumns: [durationCol, ...availableCols],
+                  totalAffectedRows: 1,
+                  remediationSuggestion: 'Verify the individual TAT components.',
+                  remediationType: 'manual',
+                  source: 'rule'
+                });
+              }
+            }
+          }
+        }
 
         // CRITICAL 6: Duplicate Request ID
         if (reqId && reqId !== '') {
@@ -65,75 +159,9 @@ export const requestDetailsRules: RuleModule = {
           reqIds.add(reqId);
         }
 
-        const isCompleted = status.includes('complete');
-
-        // CRITICAL 2: TAT/Duration Zero on Completed Request
-        if (isCompleted && durationCol && (duration === null || duration === '' || parsedDuration === 0)) {
-          issues.push({
-            id: `zero-dur-${rowNum}`,
-            issueType: 'TAT/Duration Zero on Completed Request',
-            category: 'CRITICAL ERRORS',
-            sheetName: sheet.sheetName,
-            severity: 'critical',
-            condition: 'Completed requests must have total_duration > 0',
-            description: `Request is marked Completed but total duration is 0 or empty.`,
-            affectedRows: [{ rowNumber: rowNum, columnName: durationCol, actualValue: duration, expectedValue: '> 0', requestId: reqId }],
-            affectedColumns: [durationCol, statusCol!],
-            totalAffectedRows: 1,
-            remediationSuggestion: 'Check if timestamps were recorded properly.',
-            remediationType: 'manual',
-            source: 'rule'
-          });
-        }
-
-        // CRITICAL 3: Negative Duration
-        if (parsedDuration < 0) {
-          issues.push({
-            id: `neg-dur-${rowNum}`,
-            issueType: 'Negative Duration',
-            category: 'CRITICAL ERRORS',
-            sheetName: sheet.sheetName,
-            severity: 'critical',
-            condition: 'Duration >= 0',
-            description: `Duration is negative. End time might be before Start time.`,
-            affectedRows: [{ rowNumber: rowNum, columnName: durationCol!, actualValue: parsedDuration, expectedValue: '>= 0', requestId: reqId }],
-            affectedColumns: [durationCol!],
-            totalAffectedRows: 1,
-            remediationSuggestion: 'Correct the start and end timestamps.',
-            remediationType: 'manual',
-            source: 'rule'
-          });
-        }
-
-        // CRITICAL 5: TAT Components Don't Sum to Total
-        if (durationCol && createToAcceptCol && acceptToArriveCol && arriveToCompleteCol) {
-          const p1 = parseDuration(row[createToAcceptCol]);
-          const p2 = parseDuration(row[acceptToArriveCol]);
-          const p3 = parseDuration(row[arriveToCompleteCol]);
-          const sum = p1 + p2 + p3;
-          // allow small float rounding differences
-          if (Math.abs(sum - parsedDuration) > 1) {
-            issues.push({
-              id: `sum-dur-${rowNum}`,
-              issueType: "TAT Components Don't Sum to Total",
-              category: 'CRITICAL ERRORS',
-              sheetName: sheet.sheetName,
-              severity: 'critical',
-              condition: 'Sum of components == total_duration',
-              description: `Component times (${p1} + ${p2} + ${p3} = ${sum}) do not match total duration (${parsedDuration}).`,
-              affectedRows: [{ rowNumber: rowNum, columnName: durationCol, actualValue: parsedDuration, expectedValue: String(sum), requestId: reqId }],
-              affectedColumns: [durationCol, createToAcceptCol, acceptToArriveCol, arriveToCompleteCol],
-              totalAffectedRows: 1,
-              remediationSuggestion: 'Verify the individual TAT components.',
-              remediationType: 'manual',
-              source: 'rule'
-            });
-          }
-        }
-
         // MEDIUM 1: Partial TAT with Completed Status
         // If completed, components should ideally be present if columns exist
-        if (isCompleted && createToAcceptCol && (row[createToAcceptCol] === null || row[createToAcceptCol] === '')) {
+        if (status === 'completed' && createToAcceptCol && (row[createToAcceptCol] === null || row[createToAcceptCol] === '')) {
            issues.push({
               id: `part-tat-${rowNum}`,
               issueType: 'Partial TAT with Completed Status',
@@ -152,7 +180,7 @@ export const requestDetailsRules: RuleModule = {
         }
 
         // MEDIUM 2: Missing Completion Timestamp
-        if (isCompleted && endCol && (end === null || end === '')) {
+        if (status === 'completed' && endCol && (end === null || end === '')) {
           issues.push({
             id: `miss-end-${rowNum}`,
             issueType: 'Missing Completion Timestamp',

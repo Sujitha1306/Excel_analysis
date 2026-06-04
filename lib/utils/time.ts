@@ -4,28 +4,29 @@ import { isValid, parse, differenceInSeconds } from 'date-fns';
  * Converts a time string (e.g. "HH:MM:SS" or decimal/text) into seconds.
  * Returns 0 if invalid or empty.
  */
-export function parseDuration(value: string | undefined | null): number {
-  if (!value) return 0;
+export function parseDuration(value: unknown): number {
+  if (value === null || value === undefined) return 0
   
-  const str = String(value).trim();
-  if (str === '') return 0;
-
-  // Handle HH:MM:SS or H:M:S format
-  const parts = str.split(':');
+  // Already a number
+  if (typeof value === 'number') return Math.abs(value)
+  
+  const str = String(value).trim()
+  if (!str || str === '0') return 0
+  
+  // Pure numeric string (seconds)
+  if (/^\d+(\.\d+)?$/.test(str)) return Math.abs(parseFloat(str))
+  
+  // HH:MM:SS or H:MM:SS or MM:SS
+  const parts = str.split(':').map(Number)
+  if (parts.some(isNaN)) return 0
+  
   if (parts.length === 3) {
-    const hours = parseInt(parts[0], 10) || 0;
-    const minutes = parseInt(parts[1], 10) || 0;
-    const seconds = parseInt(parts[2], 10) || 0;
-    return hours * 3600 + minutes * 60 + seconds;
+    return parts[0] * 3600 + parts[1] * 60 + parts[2]
   }
-
-  // Fallback: try parsing as a number of seconds
-  const numeric = parseFloat(str);
-  if (!isNaN(numeric)) {
-    return numeric;
+  if (parts.length === 2) {
+    return parts[0] * 60 + parts[1]
   }
-
-  return 0;
+  return 0
 }
 
 /**
@@ -33,7 +34,7 @@ export function parseDuration(value: string | undefined | null): number {
  */
 export function addDurations(a: string, b: string): string {
   const totalSeconds = parseDuration(a) + parseDuration(b);
-  return formatSecondsToHHMMSS(totalSeconds);
+  return formatDuration(totalSeconds);
 }
 
 /**
@@ -58,11 +59,14 @@ export function isValidTime(value: unknown): boolean {
 /**
  * Helper to format seconds back to HH:MM:SS
  */
-function formatSecondsToHHMMSS(seconds: number): string {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
-  
-  const pad = (num: number) => num.toString().padStart(2, '0');
-  return `${pad(h)}:${pad(m)}:${pad(s)}`;
+export function formatDuration(totalSeconds: number): string {
+  if (isNaN(totalSeconds) || totalSeconds < 0) return '00:00:00'
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = Math.floor(totalSeconds % 60)
+  return [
+    String(hours).padStart(2, '0'),
+    String(minutes).padStart(2, '0'),
+    String(seconds).padStart(2, '0')
+  ].join(':')
 }
