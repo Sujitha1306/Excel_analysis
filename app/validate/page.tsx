@@ -13,10 +13,11 @@ import { useValidation } from "@/components/ValidationProvider";
 import { useRouter } from "next/navigation";
 import { DownloadReportModal } from "@/components/report/DownloadReportModal";
 import { Button } from "@/components/ui/button";
+import { Loader2, FileSpreadsheet } from "lucide-react";
 
 export default function ValidatePage() {
   const router = useRouter();
-  const { getParsedWorkbook, setValidationReport, getValidationReport, resetValidation, isReady } = useValidation();
+  const { getParsedWorkbook, setValidationReport, getValidationReport, getOriginalFile, resetValidation, isReady } = useValidation();
   
   const { report, enriched: enrichedMap } = getValidationReport();
   
@@ -30,6 +31,7 @@ export default function ValidatePage() {
   const [acknowledgedIssues, setAcknowledgedIssues] = useState<Set<string>>(new Set());
   
   const [isDownloadModalOpen, setIsDownloadModalOpen] = useState(false);
+  const [isDownloadingExcel, setIsDownloadingExcel] = useState(false);
   const hasMounted = useRef(false);
 
   useEffect(() => {
@@ -171,6 +173,47 @@ export default function ValidatePage() {
     router.push('/');
   };
 
+  const handleDownloadAnnotated = async () => {
+    setIsDownloadingExcel(true);
+    
+    try {
+      const originalFile = getOriginalFile();
+      const currentReport = getValidationReport().report;
+      
+      if (!originalFile || !currentReport) {
+        alert('No file or report available');
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('file', originalFile);
+      formData.append('report', JSON.stringify(currentReport));
+
+      const res = await fetch('/api/download-annotated', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!res.ok) throw new Error('Download failed');
+
+      // Trigger browser download
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = originalFile.name.replace(/\.xlsx?$/, '_validated.xlsx');
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Download error:', err);
+      alert('Failed to download annotated Excel');
+    } finally {
+      setIsDownloadingExcel(false);
+    }
+  };
+
   return (
     <div className="flex h-screen bg-white overflow-hidden text-slate-900">
       
@@ -191,6 +234,24 @@ export default function ValidatePage() {
             >
               Validate Another File
             </button>
+            <Button 
+              onClick={handleDownloadAnnotated}
+              disabled={isDownloadingExcel}
+              variant="outline"
+              className="border-green-600 text-green-700 hover:bg-green-50 shadow-sm"
+            >
+              {isDownloadingExcel ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Generating...
+                </>
+              ) : (
+                <>
+                  <FileSpreadsheet className="mr-2 h-4 w-4" />
+                  Download Annotated Excel
+                </>
+              )}
+            </Button>
             <Button 
               onClick={() => setIsDownloadModalOpen(true)}
               className="bg-brand hover:bg-brand-hover text-white shadow-sm"

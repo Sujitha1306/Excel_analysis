@@ -7,8 +7,10 @@ import { EnrichedIssue } from "@/lib/ai/enrichment";
 interface ValidationContextType {
   setParsedWorkbook: (workbook: ParsedWorkbook | null) => void;
   setValidationReport: (report: ValidationReport | null, enriched?: Record<string, EnrichedIssue>) => void;
+  setOriginalFile: (file: File | null) => void;
   getParsedWorkbook: () => ParsedWorkbook | null;
   getValidationReport: () => { report: ValidationReport | null, enriched: Record<string, EnrichedIssue> };
+  getOriginalFile: () => File | null;
   resetValidation: () => void;
   isReady: boolean;
 }
@@ -20,6 +22,7 @@ export function ValidationProvider({ children }: { children: ReactNode }) {
   const parsedWorkbookRef = useRef<ParsedWorkbook | null>(null);
   const validationReportRef = useRef<ValidationReport | null>(null);
   const enrichedIssuesRef = useRef<Record<string, EnrichedIssue>>({});
+  const originalFileRef = useRef<File | null>(null);
   
   // Use state only for triggering re-renders when needed (like indicating we have results)
   const [isReady, setIsReady] = useState(false);
@@ -34,6 +37,10 @@ export function ValidationProvider({ children }: { children: ReactNode }) {
     setIsReady(true);
   };
 
+  const setOriginalFile = (file: File | null) => {
+    originalFileRef.current = file;
+  };
+
   const getParsedWorkbook = () => parsedWorkbookRef.current;
 
   const getValidationReport = () => ({
@@ -41,10 +48,13 @@ export function ValidationProvider({ children }: { children: ReactNode }) {
     enriched: enrichedIssuesRef.current
   });
 
+  const getOriginalFile = () => originalFileRef.current;
+
   const resetValidation = () => {
     parsedWorkbookRef.current = null;
     validationReportRef.current = null;
     enrichedIssuesRef.current = {};
+    originalFileRef.current = null;
     setIsReady(false);
   };
 
@@ -52,8 +62,10 @@ export function ValidationProvider({ children }: { children: ReactNode }) {
     <ValidationContext.Provider value={{
       setParsedWorkbook,
       setValidationReport,
+      setOriginalFile,
       getParsedWorkbook,
       getValidationReport,
+      getOriginalFile,
       resetValidation,
       isReady
     }}>

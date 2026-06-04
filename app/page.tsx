@@ -12,7 +12,7 @@ export default function UploadPage() {
   const [error, setError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [dropzoneKey, setDropzoneKey] = useState(0);
-  const { setParsedWorkbook, resetValidation } = useValidation();
+  const { setParsedWorkbook, resetValidation, setOriginalFile } = useValidation();
 
   React.useEffect(() => {
     // Ensure fresh dropzone
@@ -58,13 +58,14 @@ export default function UploadPage() {
       
       // Store in context ref — no size limit
       setParsedWorkbook(parsed);
+      setOriginalFile(file);
       router.push('/validate');
     } catch (err: any) {
       console.error(err);
       setError(err.message || "Failed to parse the Excel file. It might be corrupted or password protected.");
       setIsUploading(false);
     }
-  }, [router, resetValidation, setParsedWorkbook]);
+  }, [router, resetValidation, setParsedWorkbook, setOriginalFile]);
 
   const onDropRejected = useCallback(() => {
     setError("Invalid file type. Please upload an .xlsx or .xls file.");
