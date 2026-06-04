@@ -1,0 +1,4 @@
+User-Agent: *
+Allow: /
+
+Sitemap: https://excel-audit-tracker.vercel.app/sitemap.xml
