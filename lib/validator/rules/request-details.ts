@@ -66,23 +66,7 @@ export const requestDetailsRules: RuleModule = {
           if (!isNaN(startDate.getTime()) && !isNaN(endDate.getTime())) {
             const calculatedSeconds = (endDate.getTime() - startDate.getTime()) / 1000;
             
-            if (calculatedSeconds < 0) {
-              issues.push({
-                id: `neg-dur-${rowNum}`,
-                issueType: 'Negative Duration',
-                category: 'CRITICAL ERRORS',
-                sheetName: sheet.sheetName,
-                severity: 'critical',
-                condition: 'Duration >= 0',
-                description: 'End time is before Start time which is physically impossible.',
-                affectedRows: [{ rowNumber: rowNum, columnName: startCol!, actualValue: String(start), expectedValue: `<= ${end}`, requestId: reqId }],
-                affectedColumns: [startCol!, endCol!],
-                totalAffectedRows: 1,
-                remediationSuggestion: 'Correct the start and end timestamps.',
-                remediationType: 'manual',
-                source: 'rule'
-              });
-            } else {
+            if (calculatedSeconds >= 0) {
               const diff = Math.abs(calculatedSeconds - durationSeconds);
               if (diff > 60) {
                 issues.push({
@@ -101,6 +85,34 @@ export const requestDetailsRules: RuleModule = {
                   source: 'rule'
                 });
               }
+            }
+          }
+        }
+
+        // CHECK D: Negative TAT (End time before Start time)
+        if (start && end) {
+          const startDate = new Date(String(start));
+          const endDate = new Date(String(end));
+          
+          if (!isNaN(startDate.getTime()) && !isNaN(endDate.getTime())) {
+            const calculatedSeconds = (endDate.getTime() - startDate.getTime()) / 1000;
+            
+            if (calculatedSeconds < 0) {
+              issues.push({
+                id: `neg-tat-${rowNum}`,
+                issueType: 'Negative TAT',
+                category: 'CRITICAL ERRORS',
+                sheetName: sheet.sheetName,
+                severity: 'critical',
+                condition: 'End time must be after Start time',
+                description: 'End time is before Start time which is physically impossible.',
+                affectedRows: [{ rowNumber: rowNum, columnName: startCol! + ' / ' + endCol!, actualValue: `Start: ${start} → End: ${end}`, expectedValue: 'End time must be after Start time', requestId: reqId }],
+                affectedColumns: [startCol!, endCol!],
+                totalAffectedRows: 1,
+                remediationSuggestion: 'Correct the start and end timestamps.',
+                remediationType: 'manual',
+                source: 'rule'
+              });
             }
           }
         }
