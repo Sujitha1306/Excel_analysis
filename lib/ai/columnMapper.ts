@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { AzureOpenAI } from 'openai';
 import { ParsedWorkbook } from '../validator/types';
 
 export interface SheetMapping {
@@ -81,7 +81,9 @@ function heuristicMap(headers: string[]): Record<string, string> {
 export async function mapWorkbookColumns(
   parsedWorkbook: ParsedWorkbook
 ): Promise<WorkbookMapping> {
-  const apiKey = process.env.GEMINI_API_KEY || process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.AZURE_OPENAI_API_KEY;
+  const endpoint = process.env.AZURE_OPENAI_ENDPOINT;
+  const deployment = process.env.AZURE_OPENAI_DEPLOYMENT_NAME;
   
   const sheetsInfo = parsedWorkbook.sheets.map(sheet => {
     return {
@@ -91,8 +93,8 @@ export async function mapWorkbookColumns(
     };
   });
 
-  if (!apiKey) {
-    console.warn('No API key found for column mapping. Using heuristic fallback mapping.');
+  if (!apiKey || !endpoint || !deployment) {
+    console.warn('No Azure OpenAI keys found for column mapping. Using heuristic fallback mapping.');
     const fallbackMapping: WorkbookMapping = {};
     for (const sheet of parsedWorkbook.sheets) {
       const headers = sheet.data.length > 0 ? Object.keys(sheet.data[0]) : [];
@@ -105,10 +107,11 @@ export async function mapWorkbookColumns(
     return fallbackMapping;
   }
 
-  const ai = new GoogleGenerativeAI(apiKey);
-  const model = ai.getGenerativeModel({ 
-    model: 'gemini-2.5-flash',
-    generationConfig: { responseMimeType: "application/json" }
+  const client = new AzureOpenAI({
+    endpoint: endpoint,
+    apiKey: apiKey,
+    deployment: deployment,
+    apiVersion: "2024-02-15-preview"
   });
 
   const prompt = `
@@ -187,15 +190,19 @@ Return ONLY valid JSON, no markdown, no explanation.
   `;
 
   const timeoutPromise = new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new Error('Gemini timeout')), 60000)
+    setTimeout(() => reject(new Error('Azure OpenAI timeout')), 60000)
   );
 
   try {
     const result = await Promise.race([
-      model.generateContent(prompt),
+      client.chat.completions.create({
+        model: deployment,
+        messages: [{ role: 'user', content: prompt }],
+        response_format: { type: 'json_object' }
+      }),
       timeoutPromise
-    ]);
-    const raw = result.response.text();
+    ]) as any;
+    const raw = result.choices[0].message.content || '';
     const cleaned = raw
       .replace(/\\s*\`\`\`json/g, '')
       .replace(/\`\`\`/g, '')
@@ -204,7 +211,7 @@ Return ONLY valid JSON, no markdown, no explanation.
     try {
       return JSON.parse(cleaned) as WorkbookMapping;
     } catch {
-      console.error('Gemini mapping parse failed. Raw response:', raw);
+      console.error('Azure OpenAI mapping parse failed. Raw response:', raw);
       
       // Fallback
       const fallbackMapping: WorkbookMapping = {};

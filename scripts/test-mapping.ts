@@ -1,19 +1,24 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { AzureOpenAI } from 'openai';
 import * as fs from 'fs';
 import * as path from 'path';
 
 try {
   const envContent = fs.readFileSync(path.resolve(__dirname, '../.env.local'), 'utf-8');
-  const match = envContent.match(/^GEMINI_API_KEY=(.*)$/m);
-  if (match) {
-    process.env.GEMINI_API_KEY = match[1].trim();
-  }
+  // Simple env parser for test script
+  envContent.split('\n').forEach(line => {
+    const match = line.match(/^([^=]+)=(.*)$/);
+    if (match) {
+      process.env[match[1].trim()] = match[2].trim().replace(/^"|"$/g, '');
+    }
+  });
 } catch (e) { }
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
-const model = genAI.getGenerativeModel({
-  model: 'gemini-2.5-flash'
-})
+const client = new AzureOpenAI({
+  endpoint: process.env.AZURE_OPENAI_ENDPOINT,
+  apiKey: process.env.AZURE_OPENAI_API_KEY,
+  deployment: process.env.AZURE_OPENAI_DEPLOYMENT_NAME,
+  apiVersion: "2024-02-15-preview"
+});
 
 // Test with exact headers from BLK_Max_Hospital
 const testSheets = [
@@ -115,15 +120,19 @@ Return ONLY this JSON structure, no markdown:
 
 async function test() {
   try {
-    const result = await model.generateContent(prompt)
-    const text = result.response.text()
-    console.log('RAW GEMINI RESPONSE:')
+    const result = await client.chat.completions.create({
+      model: process.env.AZURE_OPENAI_DEPLOYMENT_NAME || '',
+      messages: [{ role: 'user', content: prompt }],
+      response_format: { type: 'json_object' }
+    });
+    const text = result.choices[0].message.content || '';
+    console.log('RAW AZURE RESPONSE:')
     console.log(text)
     console.log('\nPARSED RESULT:')
     const cleaned = text.replace(/\`\`\`json|\`\`\`/g, '').trim()
     console.log(JSON.parse(cleaned))
   } catch (err) {
-    console.error('GEMINI ERROR:', err)
+    console.error('AZURE OPENAI ERROR:', err)
   }
 }
 

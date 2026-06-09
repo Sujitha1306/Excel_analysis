@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { AzureOpenAI } from 'openai';
 import { generatePdfBuffer } from '@/lib/report/pdf';
 import { generateDocxBuffer } from '@/lib/report/docx';
 
@@ -8,7 +8,7 @@ import { generateDocxBuffer } from '@/lib/report/docx';
 export const runtime = 'nodejs';
 export const maxDuration = 60; // Allow 60 seconds
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+// Removed genAI global instantiation
 
 // Basic in-memory rate limiting (IP -> count & timestamp)
 // Note: In Vercel serverless, this only persists per-container, 
@@ -43,11 +43,16 @@ export async function POST(req: Request) {
     let executiveSummaryText = '';
     
     if (sections.executiveSummary) {
-      if (!process.env.GEMINI_API_KEY) {
-        executiveSummaryText = "AI API key not configured. Executive summary generation bypassed.";
+      if (!process.env.AZURE_OPENAI_API_KEY || !process.env.AZURE_OPENAI_ENDPOINT || !process.env.AZURE_OPENAI_DEPLOYMENT_NAME) {
+        executiveSummaryText = "Azure OpenAI keys not configured. Executive summary generation bypassed.";
       } else {
         try {
-          const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+          const client = new AzureOpenAI({
+            endpoint: process.env.AZURE_OPENAI_ENDPOINT,
+            apiKey: process.env.AZURE_OPENAI_API_KEY,
+            deployment: process.env.AZURE_OPENAI_DEPLOYMENT_NAME,
+            apiVersion: "2024-02-15-preview"
+          });
           const prompt = `
 You are a Data Quality Analyst. Review the following validation report metrics and generate a concise 4-5 sentence executive summary for the hospital management. Highlight the overall quality score, the severity distribution, and the top 2-3 most critical issues.
 Data:
@@ -58,10 +63,13 @@ Low Issues: ${report.lowCount}
 Total Issues: ${report.totalIssues}
 Top Issues Data: ${JSON.stringify(report.issues.slice(0, 5))}
 `;
-          const result = await model.generateContent(prompt);
-          executiveSummaryText = result.response.text();
+          const result = await client.chat.completions.create({
+            model: process.env.AZURE_OPENAI_DEPLOYMENT_NAME,
+            messages: [{ role: 'user', content: prompt }]
+          });
+          executiveSummaryText = result.choices[0].message.content || '';
         } catch (e) {
-          console.error("Gemini summary failed:", e);
+          console.error("Azure OpenAI summary failed:", e);
           executiveSummaryText = "Failed to generate AI summary due to an API error.";
         }
       }

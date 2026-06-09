@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { AzureOpenAI } from 'openai';
 import { ValidationReport } from '../validator/types';
 
 // The GoogleGenerativeAI initialization happens inside the function
@@ -17,33 +17,44 @@ export interface EnrichmentResult {
 }
 
 export async function enrichValidationReport(report: ValidationReport): Promise<EnrichmentResult> {
-  const apiKey = process.env.GEMINI_API_KEY || process.env.ANTHROPIC_API_KEY; // For flexibility
-  if (!apiKey) {
-    console.warn('No GEMINI_API_KEY found, falling back to basic rule output.');
+  const apiKey = process.env.AZURE_OPENAI_API_KEY;
+  const endpoint = process.env.AZURE_OPENAI_ENDPOINT;
+  const deployment = process.env.AZURE_OPENAI_DEPLOYMENT_NAME;
+
+  if (!apiKey || !endpoint || !deployment) {
+    console.warn('No Azure OpenAI keys found, falling back to basic rule output.');
     return generateFallback(report);
   }
 
-  const ai = new GoogleGenerativeAI(apiKey);
+  const client = new AzureOpenAI({
+    endpoint: endpoint,
+    apiKey: apiKey,
+    deployment: deployment,
+    apiVersion: "2024-02-15-preview"
+  });
 
   try {
-    const model = ai.getGenerativeModel({ 
-      model: 'gemini-2.5-flash',
-      generationConfig: { responseMimeType: "application/json" }
-    });
-    
-    // We only send the issues, not the full file data to respect privacy/security
-    const issuesPayload = report.issues.map(i => ({
-      id: i.id,
-      severity: i.severity,
-      issueType: i.issueType,
-      description: i.description
-    }));
+    // Deduplicate by issueType to avoid massive payload size errors (e.g. 10MB limit)
+    // We only need the AI to enrich each *type* of issue, not every single row!
+    const uniqueIssues: any[] = [];
+    const seenTypes = new Set();
+    for (const issue of report.issues) {
+      if (!seenTypes.has(issue.issueType)) {
+        seenTypes.add(issue.issueType);
+        uniqueIssues.push({
+          id: issue.id,
+          severity: issue.severity,
+          issueType: issue.issueType,
+          description: issue.description
+        });
+      }
+    }
 
     const prompt = `You are a medical data auditor analyzing a hospital porter dataset validation report.
 You must provide natural language enrichments for the issues found.
 
-Here are the issues:
-${JSON.stringify(issuesPayload, null, 2)}
+Here are the UNIQUE issue types found:
+${JSON.stringify(uniqueIssues, null, 2)}
 
 Respond ONLY with a JSON object matching this schema:
 {
@@ -59,17 +70,53 @@ Respond ONLY with a JSON object matching this schema:
 }`;
 
     const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Gemini timeout')), 60000)
+      setTimeout(() => reject(new Error('Azure OpenAI timeout')), 60000)
     );
 
     const result = await Promise.race([
-      model.generateContent(prompt),
+      client.chat.completions.create({
+        model: deployment,
+        messages: [{ role: 'user', content: prompt }],
+        response_format: { type: 'json_object' }
+      }),
       timeoutPromise
-    ]);
-    const responseText = result.response.text();
+    ]) as any;
+    
+    const responseText = result.choices[0].message.content || '{}';
     const parsed = JSON.parse(responseText);
     
-    return parsed as EnrichmentResult;
+    // Map the unique enrichments back to ALL original issues
+    const typeToEnrichment = new Map();
+    for (const en of parsed.enrichedIssues || []) {
+      const originalIssue = uniqueIssues.find(u => u.id === en.id);
+      if (originalIssue) {
+        typeToEnrichment.set(originalIssue.issueType, en);
+      }
+    }
+
+    const fullEnrichedIssues = report.issues.map(i => {
+      const aiData = typeToEnrichment.get(i.issueType);
+      if (aiData) {
+        return {
+          id: i.id,
+          aiDescription: aiData.aiDescription,
+          aiRemediation: aiData.aiRemediation,
+          confidence: aiData.confidence
+        };
+      }
+      // Fallback if AI missed this type
+      return {
+        id: i.id,
+        aiDescription: `🤖 ${i.description}`,
+        aiRemediation: i.remediationSuggestion || 'Manual review required',
+        confidence: 'medium' as const
+      };
+    });
+
+    return {
+      summary: parsed.summary || "Validation complete.",
+      enrichedIssues: fullEnrichedIssues
+    } as EnrichmentResult;
   } catch (error) {
     console.error('AI Enrichment Error:', error);
     return generateFallback(report);
